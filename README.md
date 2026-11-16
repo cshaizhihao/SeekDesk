@@ -33,6 +33,12 @@ SeekDesk 是面向 Mac 的第三方 NodeSeek 客户端。在侧栏找版块、�
 
 [更新日志](CHANGELOG.md) · [V1.5.0 发行说明](docs/releases/v1.5.0.md)
 
+## 界面预览
+
+| Markdown 对照预览 | 海岸主题与外观设置 |
+| --- | --- |
+| ![SeekDesk V1.5.0 的发帖编辑器与 Markdown 预览](assets/v1.5.0-composer.webp) | ![SeekDesk V1.5.0 海岸主题和白天模式](assets/v1.5.0-appearance.webp) |
+
 ## 功能
 
 | 场景 | 可以做什么 |
