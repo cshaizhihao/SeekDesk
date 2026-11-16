@@ -41,7 +41,7 @@ struct RankingSnapshot: Decodable {
         config.httpCookieStorage = nil
         config.urlCredentialStorage = nil
         config.timeoutIntervalForResource = 12
-        let session = URLSession(configuration: config)
+        let session = DeskProxyNetwork.shared.makeSession(configuration: config)
         defer { session.finishTasksAndInvalidate() }
         var request = URLRequest(url: period.url, cachePolicy: .reloadIgnoringLocalCacheData)
         request.setValue("application/json", forHTTPHeaderField: "Accept")
@@ -123,35 +123,33 @@ struct SidebarHotRanking: View {
 
     var body: some View {
         let ranked = rows
-        let contentHeight = Double(limit) * (SidebarRankLabel.rowHeight(textSize) + 1) + 72
+        let rowSpacing = 2.0
+        let contentHeight = Double(limit) * SidebarRankLabel.rowHeight(textSize) + Double(limit - 1) * rowSpacing + 72
         VStack(spacing: 0) {
-            HStack(spacing: 4) {
+            HStack(spacing: 8) {
                 RankingPeriodSelector(period: $state.period, palette: palette, compact: true)
                 Button(action: showAll) {
-                    DeskIcon("arrow.up.right", size: 10).font(.system(size: 10, weight: .semibold)).frame(width: 23, height: 23)
+                    Image(systemName: "arrow.up.right").frame(width: 26, height: 26)
                 }
-                .buttonStyle(DeskButtonStyle()).foregroundStyle(palette.accent)
+                .buttonStyle(.borderless).foregroundStyle(.secondary)
                 .accessibilityLabel("在主区打开热榜").help("在主区打开热榜")
             }
-            .padding(.horizontal, 7).padding(.vertical, 6)
+            .padding(.horizontal, 8).padding(.vertical, 6)
             if !ranked.isEmpty {
                 ScrollView {
-                    LazyVStack(spacing: 0) {
+                    LazyVStack(spacing: rowSpacing) {
                         ForEach(ranked) { row in
                             Button { _ = openTopic(row.item.url) } label: {
                                 SidebarRankLabel(position: row.position, title: row.item.post.title, size: textSize, palette: palette)
                             }
                             .buttonStyle(DeskButtonStyle())
                             .accessibilityLabel("热榜第 \(row.position) 名，\(row.item.post.title)")
-                            if row.id != ranked.last?.id {
-                                Rectangle().fill(palette.line.opacity(0.7)).frame(height: 1)
-                                    .padding(.leading, RankNumber.width(compact: true) + 15)
-                            }
                         }
                     }
                     .padding(.horizontal, 4)
                 }
                 .id(state.period)
+                .accessibilityElement(children: .contain)
                 .accessibilityLabel("\(state.period.label)侧栏前 \(ranked.count) 篇")
             } else {
                 VStack(spacing: 9) {
@@ -178,14 +176,11 @@ struct SidebarHotRanking: View {
                     Text(ranked.count == limit ? "前 \(limit) 名" : "\(ranked.count) 篇")
                 }
             }
-            .font(.caption2).foregroundStyle(.secondary)
+            .font(.caption).foregroundStyle(.secondary)
             .padding(.horizontal, 10).frame(height: 29)
         }
         .frame(height: min(availableHeight, contentHeight))
         .clipped()
-        .background(palette.reader.opacity(0.82), in: RoundedRectangle(cornerRadius: 10))
-        .clipShape(RoundedRectangle(cornerRadius: 10))
-        .overlay { RoundedRectangle(cornerRadius: 10).strokeBorder(palette.line).allowsHitTesting(false) }
     }
 }
 
@@ -200,7 +195,7 @@ struct SidebarRankLabel: View {
     var body: some View {
         HStack(alignment: .top, spacing: 7) {
             RankNumber(position: position, palette: palette, compact: true)
-            Text(title).font(.system(size: size, weight: position == 1 ? .semibold : .medium))
+            Text(title).font(.system(size: size)).foregroundStyle(.primary)
                 .lineLimit(2).fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -232,14 +227,14 @@ struct HotRankingView: View {
     var body: some View {
         VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 13) {
-                HStack(spacing: 11) {
-                    RankingEmblem(palette: palette, size: 38)
-                    Text("NodeSeek 热榜").font(.system(size: 22, weight: .bold)).accessibilityAddTraits(.isHeader)
+                HStack(spacing: 12) {
+                    RankingEmblem(palette: palette, size: 42)
+                    Text("NodeSeek 热榜").font(.system(size: 23, weight: .bold)).accessibilityAddTraits(.isHeader)
                     Spacer()
                     Button {
                         Task { await state.refresh(state.period) }
                     } label: { DeskRefreshLabel(title: "刷新热榜", loading: state.loading.contains(state.period)) }
-                    .buttonStyle(DeskButtonStyle())
+                    .buttonStyle(DeskButtonStyle()).controlSize(.large)
                     .disabled(state.loading.contains(state.period))
                 }
                 HStack(spacing: 6) {
@@ -251,14 +246,15 @@ struct HotRankingView: View {
                     }
                 }
             }
-            .padding(20).background(palette.chrome)
-            Rectangle().fill(palette.line).frame(height: 1)
+            .padding(18)
+            .deskGlass(in: RoundedRectangle(cornerRadius: 20), solid: palette.chrome)
+            .padding(.horizontal, 20).padding(.top, 16).padding(.bottom, 12)
             if state.failed.contains(state.period), state.snapshots[state.period] != nil {
                 Text("刷新失败，显示上一次榜单").font(.caption).foregroundStyle(.secondary).padding(8)
             }
             rankings.frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .background(palette.reader)
+        .background(palette.chrome)
     }
 
     @ViewBuilder private var rankings: some View {
@@ -270,16 +266,14 @@ struct HotRankingView: View {
                 }
             } else {
                 ScrollView {
-                    LazyVStack(spacing: 2) {
+                    LazyVStack(spacing: 4) {
                         ForEach(rows) { row in
                             fullRow(row)
-                            if row.position != 1 {
-                                Rectangle().fill(palette.line).frame(height: 1)
-                                    .padding(.leading, RankNumber.width(compact: false) + 21)
-                            }
                         }
                     }
-                    .frame(maxWidth: 810).padding(.horizontal, 18).padding(.vertical, 12)
+                    .padding(12).frame(maxWidth: 810)
+                    .background(palette.list, in: RoundedRectangle(cornerRadius: 18))
+                    .padding(.horizontal, 24).padding(.top, 4).padding(.bottom, 24)
                     .frame(maxWidth: .infinity)
                 }
             }
@@ -287,7 +281,7 @@ struct HotRankingView: View {
             ContentUnavailableView {
                 DeskLabel("热榜暂时无法连接", systemImage: "wifi.exclamationmark", size: 32)
             } actions: {
-                Button("重试") { Task { await state.refresh(state.period) } }
+                Button("重试") { Task { await state.refresh(state.period) } }.deskGlassButtonStyle()
             }
         } else {
             ProgressView("正在读取热榜…").controlSize(.small)
@@ -326,36 +320,14 @@ private struct RankingPeriodSelector: View {
     @Binding var period: RankingPeriod
     let palette: DeskPalette
     let compact: Bool
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        let height: CGFloat = compact ? 24 : 27
-        let gap: CGFloat = 2
-        let periods = RankingPeriod.allCases
-        let selectedIndex = periods.firstIndex(of: period) ?? 0
-        HStack(spacing: 2) {
-            ForEach(periods) { item in
-                let selected = item == period
-                Button { period = item } label: {
-                    Text(item.label).font(.system(size: compact ? 11 : 12, weight: .medium))
-                        .foregroundStyle(selected ? palette.accent : .secondary)
-                        .frame(maxWidth: .infinity).frame(height: height)
-                }
-                .buttonStyle(DeskButtonStyle())
-                .accessibilityAddTraits(selected ? .isSelected : [])
-            }
+        DeskGlassPicker(values: RankingPeriod.allCases, selection: $period,
+                        tint: palette.accent, solid: palette.selection, compact: compact) { item, _ in
+            Text(item.label).font(.system(size: compact ? 11 : 12, weight: .medium))
         }
-        .background {
-            GeometryReader { geometry in
-                let width = max(0, (geometry.size.width - gap * CGFloat(periods.count - 1)) / CGFloat(periods.count))
-                RoundedRectangle(cornerRadius: 5).fill(palette.selection)
-                    .frame(width: width, height: height)
-                    .offset(x: CGFloat(selectedIndex) * (width + gap))
-            }
-            .allowsHitTesting(false).accessibilityHidden(true)
-        }
-        .animation(reduceMotion ? nil : DeskMotion.selection, value: selectedIndex)
-        .padding(2).background(palette.surface.opacity(0.72), in: RoundedRectangle(cornerRadius: 7))
+        .padding(compact ? 0 : 5)
+        .accessibilityLabel("热榜时间范围")
     }
 }
 
@@ -385,12 +357,12 @@ private struct RankNumber: View {
                 Text("🔥").font(.system(size: compact ? 12 : 16)).accessibilityHidden(true)
             }
             Text(position < 10 ? "0\(position)" : "\(position)")
-                .font(.system(size: compact ? 11 : 13, weight: highlighted ? .bold : .semibold, design: .monospaced))
+                .font(.system(size: compact ? 11 : 13, weight: compact ? .medium : (highlighted ? .bold : .semibold), design: .monospaced))
                 .foregroundStyle(ink)
         }
         .fixedSize()
         .frame(width: Self.width(compact: compact), height: compact ? 22 : 28)
-        .background(highlighted ? ink.opacity(palette.dark ? 0.16 : 0.10) : .clear,
+        .background(highlighted && !compact ? ink.opacity(palette.dark ? 0.16 : 0.10) : .clear,
                     in: RoundedRectangle(cornerRadius: 6))
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("第 \(position) 名")

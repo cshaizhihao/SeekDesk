@@ -18,34 +18,35 @@ struct ForumSpacePane: View {
         return ForumUserReference(id: own.id, name: own.name, avatar: Forum.avatar(own.id), tags: [])
     }
 
-    private var profile: ForumUserProfile? { member.flatMap { session.profiles[$0.id] } }
     private var own: ForumProfile? { member?.id == session.ownProfile?.id ? session.ownProfile : nil }
-    private var readme: String? { (own != nil ? session.ownIntroduction?.readme : nil) ?? profile?.readme }
 
     var body: some View {
+        ForumProfileObserver(store: session.profileStore, id: member?.id) { profile in
+            ForumProfileRequestObserver(state: session.profileRequestState) { _ in spaceContent(profile: profile) }
+        }
+    }
+
+    private func spaceContent(profile: ForumUserProfile?) -> some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack {
-                Button(action: goBack) { Label(returnTitle, systemImage: "chevron.left") }
-                Spacer()
-                Text(person == nil ? "我的" : "用户空间").font(.headline)
-                Spacer()
-                if let member { Link("查看原页", destination: Forum.home.appendingPathComponent("space/\(member.id)")) }
-                if let member {
-                    Button("刷新资料") { state.profileRetry += 1 }
-                        .disabled(session.profileLoading.contains(member.id))
+            DeskGlassGroup {
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 16) {
+                        spaceNavigation
+                        spaceActions.fixedSize()
+                    }
+                    VStack(alignment: .leading, spacing: 14) {
+                        spaceNavigation
+                        spaceActions
+                    }
                 }
-                if own != nil {
-                    Button("编辑资料") { state.savedIntroduction = false; state.editingIntroduction = true }
-                        .disabled(state.editingIntroduction)
-                    Button("账号设置") { session.presentation = .profile }
-                }
+                .padding(.horizontal, 14).padding(.vertical, 12)
+                .deskGlass(in: RoundedRectangle(cornerRadius: 18), solid: palette.chrome)
             }
-            .padding(.horizontal, 20).frame(height: 48).background(palette.chrome)
-            Divider()
+            .padding(.horizontal, 24).padding(.top, 16).padding(.bottom, 16)
             if let member {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 18) {
-                        header(member)
+                        header(member, profile: profile)
                         if state.editingIntroduction, let own {
                             ProfileIntroductionEditor(owner: own.id, session: session, palette: palette,
                                 cancel: { state.editingIntroduction = false }, saved: {
@@ -58,17 +59,22 @@ struct ForumSpacePane: View {
                                 DeskLabel("个人资料已保存", systemImage: "checkmark.circle.fill").font(.callout)
                                     .foregroundStyle(palette.publish)
                             }
-                            Picker("个人空间栏目", selection: $state.section) {
-                                ForEach(Section.allCases.filter { own != nil || !$0.isPrivate }) { section in
-                                    Text(section.title).tag(section)
+                            ScrollView(.horizontal) {
+                                DeskGlassPicker(values: Section.allCases.filter { own != nil || !$0.isPrivate },
+                                                selection: $state.section, tint: palette.accent,
+                                                solid: palette.selection) { section, _ in
+                                    Text(section.title).font(.system(size: 12, weight: .medium))
                                 }
+                                .padding(5)
+                                .accessibilityLabel("个人空间栏目")
                             }
-                            .pickerStyle(.segmented).labelsHidden()
-                            sectionContent
+                            .scrollIndicators(.hidden)
+                            .frame(height: 44)
+                            sectionContent(profile: profile)
                         }
                     }
                     .frame(maxWidth: 760, alignment: .leading)
-                    .padding(.horizontal, 25).padding(.vertical, 21)
+                    .padding(.horizontal, 24).padding(.top, 4).padding(.bottom, 24)
                     .frame(maxWidth: .infinity)
                 }
                 .task(id: ProfileRequest(member: member.id, retry: state.profileRetry)) {
@@ -85,22 +91,48 @@ struct ForumSpacePane: View {
                 ContentUnavailableView {
                     Label("登录后查看我的主页", systemImage: "person.crop.circle")
                 } actions: {
-                    Button("登录 NodeSeek", action: session.signIn).buttonStyle(.borderedProminent)
+                    Button("登录 NodeSeek", action: session.signIn).deskGlassButtonStyle(prominent: true)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 VStack(spacing: 12) {
                     ProgressView("正在读取账号资料…").controlSize(.small)
-                    Button("重新读取") { Task { await session.refreshUnread() } }
+                    Button("重新读取") { Task { await session.refreshUnread() } }.deskGlassButtonStyle()
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .task(id: session.accessRevision) { await session.refreshUnread() }
             }
         }
-        .background(palette.reader)
+        .background(palette.readerWash)
     }
 
-    private func header(_ member: ForumUserReference) -> some View {
+    private var spaceNavigation: some View {
+        HStack(spacing: 14) {
+            Button(action: goBack) { Label(returnTitle, systemImage: "chevron.left") }
+                .buttonStyle(.borderless).controlSize(.large)
+            Text(person == nil ? "我的" : "用户空间")
+                .font(.system(size: 23, weight: .bold)).accessibilityAddTraits(.isHeader)
+            Spacer(minLength: 0)
+        }
+    }
+
+    private var spaceActions: some View {
+        HStack(spacing: 8) {
+            if let member { Link("查看原页", destination: Forum.home.appendingPathComponent("space/\(member.id)")) }
+            if let member {
+                Button("刷新资料") { state.profileRetry += 1 }
+                    .disabled(session.profileLoading.contains(member.id))
+            }
+            if own != nil {
+                Button("编辑资料") { state.savedIntroduction = false; state.editingIntroduction = true }
+                    .disabled(state.editingIntroduction)
+                Button("账号设置") { session.presentation = .profile }
+            }
+        }
+        .buttonStyle(.borderless).controlSize(.regular)
+    }
+
+    private func header(_ member: ForumUserReference, profile: ForumUserProfile?) -> some View {
         HStack(spacing: 14) {
             ForumAvatar(url: member.avatar ?? Forum.avatar(member.id), size: 62, palette: palette)
             VStack(alignment: .leading, spacing: 4) {
@@ -118,9 +150,11 @@ struct ForumSpacePane: View {
                 Button("发私信") { openMessage(member) }.buttonStyle(.bordered)
             }
         }
+        .padding(22).frame(maxWidth: .infinity, alignment: .leading)
+        .deskGlass(in: RoundedRectangle(cornerRadius: 18), solid: palette.list)
     }
 
-    @ViewBuilder private var sectionContent: some View {
+    @ViewBuilder private func sectionContent(profile: ForumUserProfile?) -> some View {
         if state.section == .overview {
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 110), spacing: 8)], spacing: 8) {
                 metric("主题帖", own?.topics ?? profile?.nPost, section: .discussions)
@@ -132,13 +166,13 @@ struct ForumSpacePane: View {
             if let joined = own?.joined ?? profile?.created_at_str, !joined.isEmpty {
                 Text("加入于 \(joined)").font(.callout).foregroundStyle(.secondary)
             }
-            readmeSection
+            readmeSection(profile: profile)
         } else if state.loading {
             ProgressView("正在读取\(state.section.title)…").controlSize(.small).padding(.vertical, 12)
         } else if let error = state.error {
             VStack(alignment: .leading, spacing: 9) {
                 Text(error).foregroundStyle(.secondary)
-                Button("重试") { state.revision += 1 }
+                Button("重试") { state.revision += 1 }.deskGlassButtonStyle()
             }
         } else if state.section.isPrivate {
             VStack(alignment: .leading, spacing: 0) {
@@ -158,13 +192,16 @@ struct ForumSpacePane: View {
                     if member.id != state.members.last?.id { Divider() }
                 }
             }
+            .padding(16).frame(maxWidth: .infinity, alignment: .leading)
+            .background(palette.list, in: RoundedRectangle(cornerRadius: 16))
         } else {
             activityList
         }
     }
 
-    private var readmeSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
+    private func readmeSection(profile: ForumUserProfile?) -> some View {
+        let readme = (own != nil ? session.ownIntroduction?.readme : nil) ?? profile?.readme
+        return VStack(alignment: .leading, spacing: 10) {
             Text("README").font(.headline).accessibilityAddTraits(.isHeader)
             if let readme {
                 if readme.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -177,12 +214,12 @@ struct ForumSpacePane: View {
             } else {
                 HStack(spacing: 8) {
                     Text("暂时无法读取 README。").font(.callout).foregroundStyle(.secondary)
-                    Button("重试") { state.profileRetry += 1 }
+                    Button("重试") { state.profileRetry += 1 }.deskGlassButtonStyle()
                 }
             }
         }
-        .padding(14).frame(maxWidth: .infinity, alignment: .leading)
-        .background(palette.surface, in: RoundedRectangle(cornerRadius: 8))
+        .padding(20).frame(maxWidth: .infinity, alignment: .leading)
+        .background(palette.list, in: RoundedRectangle(cornerRadius: 16))
     }
 
     private var activityList: some View {
@@ -214,10 +251,15 @@ struct ForumSpacePane: View {
                     if item.id != state.items.last?.id { Divider() }
                 }
             }
-            HStack {
-                Button("上一页") { state.page -= 1 }.disabled(state.page <= 1)
-                Text("第 \(state.page) 页").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-                Button("下一页") { state.page += 1 }.disabled(state.items.count < 15)
+            .padding(12).frame(maxWidth: .infinity, alignment: .leading)
+            .background(palette.list, in: RoundedRectangle(cornerRadius: 16))
+            DeskGlassGroup {
+                HStack(spacing: 12) {
+                    Button("上一页") { state.page -= 1 }.disabled(state.page <= 1)
+                    Text("第 \(state.page) 页").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                    Button("下一页") { state.page += 1 }.disabled(state.items.count < 15)
+                }
+                .deskGlassButtonStyle().controlSize(.regular)
             }
         }
     }
@@ -228,7 +270,7 @@ struct ForumSpacePane: View {
             Text(value.map { $0.formatted() } ?? "—").font(.system(size: 20, weight: .semibold).monospacedDigit())
         }
         .frame(maxWidth: .infinity, alignment: .leading).padding(12)
-        .background(palette.surface, in: RoundedRectangle(cornerRadius: 8))
+        .deskGlass(in: RoundedRectangle(cornerRadius: 8), solid: palette.list)
         return Group {
             if let section { Button { state.section = section } label: { card }.buttonStyle(DeskButtonStyle()) }
             else { card }

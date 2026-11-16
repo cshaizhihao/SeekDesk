@@ -9,20 +9,28 @@ struct ForumUserCard: View {
 
     @StateObject private var controls = Controls()
 
-    private var profile: ForumUserProfile? { session.profiles[person.id] }
-
     var body: some View {
+        ForumProfileObserver(store: session.profileStore, id: person.id) { profile in
+            ForumProfileRequestObserver(state: session.profileRequestState) { _ in cardContent(profile: profile) }
+        }
+    }
+
+    private func cardContent(profile: ForumUserProfile?) -> some View {
         VStack(alignment: .leading, spacing: 17) {
             HStack(spacing: 11) {
                 ForumAvatar(url: person.avatar ?? Forum.avatar(person.id), size: 56, palette: palette)
                 VStack(alignment: .leading, spacing: 5) {
                     Text(profile?.member_name ?? person.name).font(.system(size: 21, weight: .semibold))
+                        .lineLimit(2).fixedSize(horizontal: false, vertical: true)
                     Text("#\(person.id)").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
                     UserBadges(rank: profile?.rank, tags: person.tags + (profile?.tags ?? []), palette: palette)
                 }
                 Spacer()
-                Button("关闭") { session.presentation = nil }.keyboardShortcut(.cancelAction)
+                Button("关闭") { session.presentation = nil }
+                    .buttonStyle(.borderless).keyboardShortcut(.cancelAction)
             }
+            .padding(14)
+            .deskGlass(in: RoundedRectangle(cornerRadius: 16), solid: palette.chrome)
             if let profile {
                 HStack(spacing: 9) {
                     metric("主题", profile.nPost)
@@ -45,18 +53,21 @@ struct ForumUserCard: View {
                     Button("重试") { controls.retry += 1 }.buttonStyle(.borderless)
                 }
             }
-            HStack {
-                Button("刷新资料") { controls.retry += 1 }.disabled(session.profileLoading.contains(person.id))
-                Spacer()
-            }
-            HStack {
-                Button("查看个人主页", action: openSpace)
-                Spacer()
-                Button(action: openMessage) { DeskLabel("发私信", systemImage: "bubble.left") }
-                    .buttonStyle(.borderedProminent)
+            Divider()
+            DeskGlassGroup {
+                VStack(alignment: .leading, spacing: 12) {
+                    Button("刷新资料") { controls.retry += 1 }
+                        .deskGlassButtonStyle().disabled(session.profileLoading.contains(person.id))
+                    HStack {
+                        Button("查看个人主页", action: openSpace).deskGlassButtonStyle()
+                        Spacer()
+                        Button(action: openMessage) { DeskLabel("发私信", systemImage: "bubble.left") }
+                            .deskGlassButtonStyle(prominent: true)
+                    }
+                }
             }
         }
-        .padding(20).frame(width: 480).background(palette.reader)
+        .padding(20).frame(width: 480).background(palette.readerWash)
         .task(id: "\(person.id)|\(controls.retry)") { await session.loadProfile(person.id, force: controls.retry > 0) }
     }
 

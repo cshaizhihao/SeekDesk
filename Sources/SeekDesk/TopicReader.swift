@@ -18,6 +18,16 @@ enum DeskTextSize {
     static let sidebarRange = 11.0...22.0
 }
 
+enum DeskReadingDensity: String, CaseIterable, Identifiable {
+    case compact, comfortable
+    static let preference = "workspace.readingDensity"
+    var id: String { rawValue }
+    var title: String { self == .compact ? "紧凑" : "舒适" }
+    var rowPadding: CGFloat { self == .compact ? 8 : 12 }
+    var floorSpacing: CGFloat { self == .compact ? 19 : 27 }
+    var readingWidth: CGFloat { self == .compact ? 960 : 860 }
+}
+
 struct DeskPalette: Equatable {
     let dark: Bool
     var readingSize = DeskTextSize.bodyDefault
@@ -27,14 +37,14 @@ struct DeskPalette: Equatable {
     var unread: Color { tone(0xC12838, 0xFF656D) }
     var featured: Color { tone(0x91600A, 0xEBC476) }
     var readingRestriction: Color { tone(0x8C4250, 0xEBA8B5) }
-    var chrome: Color { tone(0xF4F4F6, 0x1B1B1D) }
-    var sidebar: Color { tone(0xF2F2F4, 0x202022) }
-    var list: Color { tone(0xF8F8FA, 0x171719) }
-    var reader: Color { tone(0xFFFFFF, 0x101012) }
-    var readerWash: Color { tone(0xF3F3F5, 0x1C1C1E) }
-    var line: Color { tone(0xE2E2E5, 0x2C2C2F) }
-    var surface: Color { tone(0xF0F0F2, 0x222225) }
-    var selection: Color { tone(0xE5EEF9, 0x202D3C) }
+    var chrome: Color { Color(nsColor: .windowBackgroundColor) }
+    var sidebar: Color { Color(nsColor: .windowBackgroundColor) }
+    var list: Color { Color(nsColor: .controlBackgroundColor) }
+    var reader: Color { Color(nsColor: .textBackgroundColor) }
+    var readerWash: Color { tone(0xF7FAFE, 0x181F28) }
+    var line: Color { Color(nsColor: .separatorColor).opacity(0.6) }
+    var surface: Color { Color(nsColor: .quaternaryLabelColor).opacity(0.45) }
+    var selection: Color { tone(0xE5EFFC, 0x24384F) }
 
     func rankingInk(_ position: Int) -> Color {
         switch position {
@@ -68,6 +78,7 @@ enum DeskMotion {
     static let selection = Animation.smooth(duration: 0.18, extraBounce: 0)
     static let reader = Animation.easeOut(duration: 0.16)
     static let pane = Animation.smooth(duration: 0.24, extraBounce: 0)
+    static let image = Animation.smooth(duration: 0.22, extraBounce: 0)
 }
 
 struct DeskArrival: ViewModifier {
@@ -119,14 +130,14 @@ struct DeskButtonStyle: ButtonStyle {
         @StateObject private var pointer = Pointer()
 
         var body: some View {
-            let highlight = configuration.isPressed ? 0.115 : pointer.isHovering ? 0.054 : 0
+            let highlight = configuration.isPressed ? (compresses ? 0.14 : 0.10) : pointer.isHovering ? 0.054 : 0
             configuration.label
                 .overlay {
                     RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(isEnabled ? highlight : 0))
                         .allowsHitTesting(false).accessibilityHidden(true)
                         .animation(reduceMotion ? nil : DeskMotion.feedback, value: highlight)
                 }
-                .scaleEffect(compresses && configuration.isPressed && !reduceMotion ? 0.97 : 1)
+                // Keep glyphs at their laid-out size; pressed feedback belongs to the surface.
                 .opacity(isEnabled ? 1 : 0.48)
                 .contentShape(Rectangle())
                 .onHover { if pointer.isHovering != $0 { pointer.isHovering = $0 } }

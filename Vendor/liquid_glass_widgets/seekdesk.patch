@@ -1,0 +1,1713 @@
+--- /dev/null
++++ b/lib/glass_work_diagnostics.dart
+@@ -0,0 +1,78 @@
++import 'dart:ui' as ui;
++
++/// Fixed, content-free synchronous work categories for local diagnostics.
++/// Durations are inclusive within each category and must not be added across
++/// nested work. Image-handle creation does not measure completed GPU work.
++enum GlassWorkKind {
++  shapeGeometry,
++  geometryPicture,
++  geometryImageHandle,
++  shadowBake,
++  shaderInstance,
++}
++
++/// An optional observer of UI-thread work. Width and height are physical image
++/// pixels when supplied; count is the number of shapes, shadows, or instances.
++typedef GlassWorkObserver = void Function(
++  GlassWorkKind kind, {
++  required int startedUnixMicros,
++  required int durationMicros,
++  int? width,
++  int? height,
++  int? count,
++  int? frameNumber,
++});
++
++/// Explicitly imported by a local diagnostic host; no observer is installed by
++/// the library. Disabled builds allocate no measurement objects or clocks.
++class GlassWorkDiagnostics {
++  GlassWorkDiagnostics._();
++
++  static const enabled =
++      bool.fromEnvironment('SEEKDESK_PROFILE_FRAMES') &&
++      bool.fromEnvironment('SEEKDESK_PROFILE_RAW_FRAMES');
++
++  static GlassWorkObserver? observer;
++
++  static GlassWorkMeasurement? begin(GlassWorkKind kind) {
++    if (!enabled) return null;
++    final callback = observer;
++    if (callback == null) return null;
++    return GlassWorkMeasurement._(kind, callback);
++  }
++}
++
++/// A single synchronous measurement. Call [finish] from finally so an original
++/// rendering exception propagates unchanged even when an observer fails.
++class GlassWorkMeasurement {
++  GlassWorkMeasurement._(this._kind, this._observer)
++    : _startedUnixMicros = DateTime.now().microsecondsSinceEpoch,
++      _frameNumber = ui.PlatformDispatcher.instance.frameData.frameNumber,
++      _clock = Stopwatch()..start();
++
++  final GlassWorkKind _kind;
++  final GlassWorkObserver _observer;
++  final int _startedUnixMicros;
++  final int _frameNumber;
++  final Stopwatch _clock;
++  bool _finished = false;
++
++  void finish({int? width, int? height, int? count}) {
++    if (_finished) return;
++    _finished = true;
++    _clock.stop();
++    try {
++      _observer(
++        _kind,
++        startedUnixMicros: _startedUnixMicros,
++        durationMicros: _clock.elapsedMicroseconds,
++        width: width,
++        height: height,
++        count: count,
++        frameNumber: _frameNumber,
++      );
++    } on Object {
++      // Optional diagnostics must never fail a render or replace its error.
++    }
++  }
++}
+--- a/lib/src/engine/liquid_glass_layer.dart
++++ b/lib/src/engine/liquid_glass_layer.dart
+@@ -15,6 +15,7 @@
+ import 'package:flutter/widgets.dart';
+ import 'package:flutter/rendering.dart';
+ import 'package:flutter/scheduler.dart' show SchedulerBinding, SchedulerPhase;
++import '../../glass_work_diagnostics.dart';
+ import '../renderer/glass_backdrop_group.dart';
+ import '../renderer/glass_backdrop_group_boundary.dart';
+ import '../renderer/glass_frost_budget.dart';
+@@ -1095,36 +1096,50 @@
+   }
+ 
+   void _bakeShadows(ui.Image geometry, Rect bounds) {
+-    _bakedShadow?.dispose();
+-    _bakedShadow = null;
+-    _bakedShadowGeometry = geometry;
+-    _bakedShadowList = List.of(shadows);
+-    _bakedShadowBounds = bounds;
+-    _bakedShadowDpr = devicePixelRatio;
+-
+-    Rect? area;
+-    for (final shadow in shadows) {
+-      if (shadow.color.a == 0) continue;
+-      final clip = _shadowClip(bounds, shadow);
+-      area = area == null ? clip : area.expandToInclude(clip);
+-    }
+-    if (area == null) return;
+-    final dpr = devicePixelRatio;
+-    final width = (area.width * dpr).ceil();
+-    final height = (area.height * dpr).ceil();
+-    if (width <= 0 || height <= 0) return;
+-    // Whole physical pixels, so the image is drawn back unscaled.
+-    final rect = Rect.fromLTWH(area.left, area.top, width / dpr, height / dpr);
+-
+-    final recorder = ui.PictureRecorder();
+-    final canvas = Canvas(recorder)
+-      ..scale(dpr)
+-      ..translate(-rect.left, -rect.top);
+-    _drawShadows(canvas, bounds, geometry);
+-    final picture = recorder.endRecording();
+-    _bakedShadow = picture.toImageSync(width, height);
+-    picture.dispose();
+-    _bakedShadowRect = rect;
++    final work = GlassWorkDiagnostics.enabled
++        ? GlassWorkDiagnostics.begin(GlassWorkKind.shadowBake)
++        : null;
++    int? measuredWidth, measuredHeight;
++    try {
++      _bakedShadow?.dispose();
++      _bakedShadow = null;
++      _bakedShadowGeometry = geometry;
++      _bakedShadowList = List.of(shadows);
++      _bakedShadowBounds = bounds;
++      _bakedShadowDpr = devicePixelRatio;
++
++      Rect? area;
++      for (final shadow in shadows) {
++        if (shadow.color.a == 0) continue;
++        final clip = _shadowClip(bounds, shadow);
++        area = area == null ? clip : area.expandToInclude(clip);
++      }
++      if (area == null) return;
++      final dpr = devicePixelRatio;
++      final width = (area.width * dpr).ceil();
++      final height = (area.height * dpr).ceil();
++      measuredWidth = width;
++      measuredHeight = height;
++      if (width <= 0 || height <= 0) return;
++      // Whole physical pixels, so the image is drawn back unscaled.
++      final rect = Rect.fromLTWH(area.left, area.top, width / dpr, height / dpr);
++
++      final recorder = ui.PictureRecorder();
++      final canvas = Canvas(recorder)
++        ..scale(dpr)
++        ..translate(-rect.left, -rect.top);
++      _drawShadows(canvas, bounds, geometry);
++      final picture = recorder.endRecording();
++      _bakedShadow = picture.toImageSync(width, height);
++      picture.dispose();
++      _bakedShadowRect = rect;
++    } finally {
++      work?.finish(
++        width: measuredWidth,
++        height: measuredHeight,
++        count: shadows.length,
++      );
++    }
+   }
+ 
+   /// Paints the shadows as a paint pass would, for tests: [geometry] stands
+--- a/lib/src/engine/multi_shader_builder.dart
++++ b/lib/src/engine/multi_shader_builder.dart
+@@ -12,6 +12,7 @@
+ 
+ import 'package:flutter/foundation.dart' show listEquals;
+ import 'package:flutter/widgets.dart';
++import '../../glass_work_diagnostics.dart';
+ 
+ /// A callback used by [MultiShaderBuilder].
+ typedef MultiShaderBuilderCallback = Widget Function(
+@@ -208,7 +209,14 @@
+     for (final assetKey in assetKeys) {
+       if (_shaderCache.containsKey(assetKey)) {
+         _programs[assetKey] = _shaderCache[assetKey]!;
+-        _shaders[assetKey] = _programs[assetKey]!.fragmentShader();
++        final work = GlassWorkDiagnostics.enabled
++            ? GlassWorkDiagnostics.begin(GlassWorkKind.shaderInstance)
++            : null;
++        try {
++          _shaders[assetKey] = _programs[assetKey]!.fragmentShader();
++        } finally {
++          work?.finish(count: 1);
++        }
+       } else {
+         uncachedKeys.add(assetKey);
+       }
+@@ -233,7 +241,14 @@
+           }
+           setState(() {
+             _programs[assetKey] = program;
+-            _shaders[assetKey] = program.fragmentShader();
++            final work = GlassWorkDiagnostics.enabled
++                ? GlassWorkDiagnostics.begin(GlassWorkKind.shaderInstance)
++                : null;
++            try {
++              _shaders[assetKey] = program.fragmentShader();
++            } finally {
++              work?.finish(count: 1);
++            }
+           });
+         },
+         onError: (Object error, StackTrace stackTrace) {
+--- a/lib/src/engine/render_liquid_glass_geometry.dart
++++ b/lib/src/engine/render_liquid_glass_geometry.dart
+@@ -13,6 +13,7 @@
+ 
+ import 'package:flutter/rendering.dart';
+ import '../../constants/glass_defaults.dart';
++import '../../glass_work_diagnostics.dart';
+ import '../renderer/fragment_shader_extensions.dart';
+ import 'liquid_glass.dart';
+ import 'liquid_glass_blend_group.dart';
+@@ -212,55 +213,62 @@
+ 
+   /// Should be called from within [paint] to maybe rebuild the [geometry].
+   GeometryCache? maybeRebuildGeometry() {
+-    if (geometryState == LiquidGlassGeometryState.updated &&
+-        geometry != null &&
+-        isGeometryCacheValid) {
+-      return geometry;
+-    }
+-
+-    final (layerBounds, shapes, anyShapeChangedInLayer) = gatherShapeData();
+-
+-    if (geometryState == LiquidGlassGeometryState.mightNeedUpdate &&
+-        !anyShapeChangedInLayer &&
+-        geometry != null) {
+-      // Nothing about the shapes changed in the group's space, so the layer's
+-      // matte is still right and the link is not marked dirty. Only the
+-      // recorded Picture is turned into an image (once; rendered caches
+-      // return themselves), so later matte rebuilds blit it instead of
+-      // replaying the geometry shader.
+-      geometry = geometry!.render();
++    final work = GlassWorkDiagnostics.enabled
++        ? GlassWorkDiagnostics.begin(GlassWorkKind.shapeGeometry)
++        : null;
++    try {
++      if (geometryState == LiquidGlassGeometryState.updated &&
++          geometry != null &&
++          isGeometryCacheValid) {
++        return geometry;
++      }
++
++      final (layerBounds, shapes, anyShapeChangedInLayer) = gatherShapeData();
++
++      if (geometryState == LiquidGlassGeometryState.mightNeedUpdate &&
++          !anyShapeChangedInLayer &&
++          geometry != null) {
++        // Nothing about the shapes changed in the group's space, so the layer's
++        // matte is still right and the link is not marked dirty. Only the
++        // recorded Picture is turned into an image (once; rendered caches
++        // return themselves), so later matte rebuilds blit it instead of
++        // replaying the geometry shader.
++        geometry = geometry!.render();
++        geometryState = LiquidGlassGeometryState.updated;
++        return geometry;
++      }
++
++      geometry?.dispose();
++      geometry = null;
+       geometryState = LiquidGlassGeometryState.updated;
+-      return geometry;
+-    }
+-
+-    geometry?.dispose();
+-    geometry = null;
+-    geometryState = LiquidGlassGeometryState.updated;
+-
+-    if (shapes.isEmpty) {
+-      return null;
+-    }
+-
+-    final snappedBounds = layerBounds.snapToPixels(devicePixelRatio);
+-    final matteBounds = Rect.fromLTWH(
+-      snappedBounds.left * devicePixelRatio,
+-      snappedBounds.top * devicePixelRatio,
+-      snappedBounds.width * devicePixelRatio,
+-      snappedBounds.height * devicePixelRatio,
+-    ).snapToPixels(1);
+-
+-    // Set the new geometry
+-    final newGeo = geometry = UnrenderedGeometryCache(
+-      matte: _buildGeometryPicture(snappedBounds, shapes),
+-      bounds: snappedBounds,
+-      matteBounds: matteBounds,
+-      shapes: shapes,
+-      path: getPath(shapes),
+-    );
+-
+-    // We have updated the geometry.
+-    _renderLink?.notifyGeometryChanged(this);
+-    return newGeo;
++
++      if (shapes.isEmpty) {
++        return null;
++      }
++
++      final snappedBounds = layerBounds.snapToPixels(devicePixelRatio);
++      final matteBounds = Rect.fromLTWH(
++        snappedBounds.left * devicePixelRatio,
++        snappedBounds.top * devicePixelRatio,
++        snappedBounds.width * devicePixelRatio,
++        snappedBounds.height * devicePixelRatio,
++      ).snapToPixels(1);
++
++      // Set the new geometry
++      final newGeo = geometry = UnrenderedGeometryCache(
++        matte: _buildGeometryPicture(snappedBounds, shapes),
++        bounds: snappedBounds,
++        matteBounds: matteBounds,
++        shapes: shapes,
++        path: getPath(shapes),
++      );
++
++      // We have updated the geometry.
++      _renderLink?.notifyGeometryChanged(this);
++      return newGeo;
++    } finally {
++      work?.finish(count: geometry?.shapes.length ?? 0);
++    }
+   }
+ 
+   Picture _buildGeometryPicture(
+--- a/lib/src/engine/rendering/liquid_glass_render_object.dart
++++ b/lib/src/engine/rendering/liquid_glass_render_object.dart
+@@ -16,6 +16,7 @@
+ import 'package:flutter/rendering.dart';
+ import 'package:flutter/scheduler.dart';
+ import 'package:flutter/widgets.dart';
++import '../../../glass_work_diagnostics.dart';
+ import '../../renderer/fragment_shader_extensions.dart';
+ import '../../renderer/liquid_glass_renderer.dart'
+     show debugPaintLiquidGlassGeometry;
+@@ -929,17 +930,37 @@
+       ..addAll([for (final (_, _, transform) in geometries) transform]);
+ 
+     // Record canvas commands synchronously — pure CPU work.
+-    final (picture, localBounds, imageSize) =
+-        _recordGeometryPicture(geometries, bounds, matteDevicePixelRatio);
++    final pictureWork = GlassWorkDiagnostics.enabled
++        ? GlassWorkDiagnostics.begin(GlassWorkKind.geometryPicture)
++        : null;
++    late final (ui.Picture, Rect, Size) recorded;
++    try {
++      recorded =
++          _recordGeometryPicture(geometries, bounds, matteDevicePixelRatio);
++    } finally {
++      pictureWork?.finish(count: geometries.length);
++    }
++    final (picture, localBounds, imageSize) = recorded;
+ 
+     try {
+       // Synchronous GPU rasterization — no async lag.
+       // Clamp to ≥1: jelly squash can push geometry to near-zero size and
+       // toImageSync(0, n) throws "Invalid image dimensions".
+-      final image = picture.toImageSync(
+-        max(1, imageSize.width.ceil()),
+-        max(1, imageSize.height.ceil()),
+-      );
++      final width = max(1, imageSize.width.ceil());
++      final height = max(1, imageSize.height.ceil());
++      final imageWork = GlassWorkDiagnostics.enabled
++          ? GlassWorkDiagnostics.begin(GlassWorkKind.geometryImageHandle)
++          : null;
++      late final ui.Image image;
++      try {
++        image = picture.toImageSync(width, height);
++      } finally {
++        imageWork?.finish(
++          width: width,
++          height: height,
++          count: geometries.length,
++        );
++      }
+ 
+       _clearGeometryImage();
+       _geometryImage = image;
+--- a/lib/src/widgets/interactive/scrollable_segment_content.dart
++++ b/lib/src/widgets/interactive/scrollable_segment_content.dart
+@@ -6,7 +6,7 @@
+ 
+ import 'package:flutter/gestures.dart';
+ import 'package:flutter/cupertino.dart';
+-import 'package:flutter/rendering.dart' show RenderPositionedBox;
++import 'package:flutter/rendering.dart' show RenderPositionedBox, RenderProxyBox;
+ import '../../../constants/glass_defaults.dart';
+ import '../../renderer/liquid_glass_renderer.dart';
+ import '../../../theme/glass_theme.dart';
+@@ -188,6 +188,12 @@
+ 
+   /// Guards the two-beat centering against rapid re-selection.
+   int _seatGen = 0;
++  bool _seatPending = false;
++  bool _autoReveal = true;
++  final Set<int> _pressedPointers = {};
++  bool _pointerStructureChanged = false;
++  int _pointerSequence = 0;
++  double? _viewportWidth;
+ 
+   /// Delay between the pill's travel starting and the centering scroll.
+   /// The pill's snappy spring covers most of its distance by ~150 ms, so
+@@ -206,13 +212,19 @@
+   /// simultaneously with the pill's travel made both land in the same
+   /// instant — nothing ever visibly arrived at the tapped spot.
+   void _seatSelection(int index) {
+-    if (widget.selectionAlignment != SegmentSelectionAlignment.center) {
++    if (!mounted || !_autoReveal || index != widget.selectedIndex) return;
++    if (widget.selectionAlignment != SegmentSelectionAlignment.center ||
++        GlassAccessibilityData.of(context).reduceMotion) {
++      _seatPending = false;
+       _scrollToEnsureVisible(index);
+       return;
+     }
+     final gen = ++_seatGen;
++    _seatPending = true;
+     Future.delayed(_kCenterAfterSelectDelay, () {
+-      if (!mounted || gen != _seatGen || _morphing || _isDragging) return;
++      if (!mounted || gen != _seatGen) return;
++      _seatPending = false;
++      if (!_autoReveal || _morphing || _isDragging) return;
+       if (widget.selectedIndex != index) return; // superseded
+       _scrollToEnsureVisible(index);
+     });
+@@ -235,6 +247,84 @@
+   final Map<Object, GlobalKey> _cellKeysById = {};
+   List<double> _tabWidths = [];
+   List<double> _tabOffsets = [];
++  final Map<GlobalKey, double> _naturalWidths = {};
++  bool _measureScheduled = false;
++  bool _revealAfterMeasure = false;
++  bool _snapNextMeasure = true;
++  bool _geometryPending = true;
++  bool _indicatorGeometryDirty = false;
++  bool _viewportGeometryDirty = false;
++
++  // Size notifications can arrive during layout (including every frame of
++  // AnimatedDefaultTextStyle). Only the coalesced post-layout pass touches
++  // state/springs. An unchanged layout never schedules another pass.
++  void _scheduleMeasure({bool reveal = true}) {
++    if (!mounted) return;
++    _revealAfterMeasure |= reveal;
++    if (_measureScheduled) return;
++    _measureScheduled = true;
++    WidgetsBinding.instance.addPostFrameCallback((_) {
++      _measureScheduled = false;
++      if (mounted) _measureTabs();
++    });
++    WidgetsBinding.instance.ensureVisualUpdate();
++  }
++
++  void _cellSizeChanged(GlobalKey key, Size size) {
++    if (_naturalWidths[key] == size.width) return;
++    if (_pressedPointers.isNotEmpty) _pointerStructureChanged = true;
++    _naturalWidths[key] = size.width;
++    _scheduleMeasure();
++  }
++
++  void _viewportSizeChanged(Size size) {
++    if (_viewportWidth == size.width) return;
++    _viewportWidth = size.width;
++    _viewportGeometryDirty = true;
++    if (_pressedPointers.isNotEmpty) _pointerStructureChanged = true;
++    // Resizing the viewport is a new reason to reveal the selection. A title
++    // or font change, however, must not undo a user's deliberate strip scroll.
++    if (_pressedPointers.isEmpty && !_isDragging && !_isDraggingIndicator &&
++        (!widget.scrollController.hasClients ||
++            !widget.scrollController.position.isScrollingNotifier.value)) {
++      _autoReveal = true;
++    }
++    _scheduleMeasure();
++  }
++
++  void _pointerFinished(PointerEvent event) {
++    _pressedPointers.remove(event.pointer);
++    // Keep invalidation through the current gesture dispatch: recognizer
++    // callbacks can follow this raw pointer-up. Clear it after dispatch so
++    // later keyboard/semantic activation is not blocked until another click.
++    if (_pressedPointers.isEmpty) {
++      final sequence = _pointerSequence;
++      Future<void>.microtask(() {
++        if (mounted && sequence == _pointerSequence &&
++            _pressedPointers.isEmpty) {
++          _pointerStructureChanged = false;
++        }
++      });
++    }
++    _scheduleMeasure(reveal: false);
++  }
++
++  void _userScroll() {
++    _autoReveal = false;
++    _revealAfterMeasure = false;
++    _seatPending = false;
++    _seatGen++;
++    if (_morphing) _finishMorph();
++  }
++
++  bool get _canReveal =>
++      _autoReveal &&
++      !_seatPending &&
++      !_isDragging &&
++      !_isDraggingIndicator &&
++      _pressedPointers.isEmpty &&
++      widget.scrollController.hasClients &&
++      !widget.scrollController.position.isScrollingNotifier.value;
+ 
+   // Gesture recognizers for precision control.
+   late HorizontalDragGestureRecognizer _drag;
+@@ -295,11 +385,35 @@
+       if (id == null || !seen.add(id)) return GlobalKey();
+       return _cellKeysById.putIfAbsent(id, GlobalKey.new);
+     });
+-    WidgetsBinding.instance.addPostFrameCallback((_) => _measureTabs());
++    _cellKeysById.removeWhere((id, _) => !seen.contains(id));
++    _naturalWidths.removeWhere((key, _) => !_tabKeys.contains(key));
++    _geometryPending = true;
++    _indicatorGeometryDirty = true;
++    _scheduleMeasure();
+   }
+ 
+   void _measureTabs() {
+-    if (!mounted || _morphing) return;
++    if (!mounted) return;
++    if (_morphing) {
++      // Observe NATURAL widths inside the morph's Align/Transform. Measuring
++      // its animated outer width would feed the shrinking geometry back into
++      // the next tick and progressively collapse the cells.
++      final naturals = _morphNaturalWidths;
++      if (naturals == null || naturals.length != _tabKeys.length) return;
++      var changed = false;
++      for (var i = 0; i < naturals.length; i++) {
++        final width = _naturalWidths[_tabKeys[i]];
++        if (width != null && (width - naturals[i]).abs() > .01) {
++          naturals[i] = width;
++          changed = true;
++        }
++      }
++      if (changed) {
++        _indWidthSpring.animateTo(naturals[_morphSelectedIndex]);
++        _onMorphTick();
++      }
++      return;
++    }
+     double offset = 0;
+     List<double> widths = [];
+     List<double> offsets = [];
+@@ -319,31 +433,57 @@
+         offset += dividerWidth;
+       }
+     }
+-    if (allMeasured) {
++    if (allMeasured && widths.isNotEmpty) {
+       final selIdx = widget.selectedIndex.clamp(0, widths.length - 1);
+-      setState(() {
+-        _tabWidths = widths;
+-        _tabOffsets = offsets;
+-        // Snap indicator to the selected tab after (re)measure; the epoch
+-        // makes the rendered pill jump with the springs instead of
+-        // animating in from stale geometry. This is also the handoff that
+-        // releases a morph's anchor — by now spring-position minus scroll
+-        // equals the anchor, so the switch is pixel-invisible.
+-        _indicatorEpoch++;
+-        _morphSettling = false;
+-        _indOffsetSpring.setValue(offsets[selIdx]);
+-        _indWidthSpring.setValue(widths[selIdx]);
+-      });
+-      // A selection outside the viewport comes into view without animation:
+-      // at first measure there is no prior state the user has seen, and
+-      // after a list change the host may have positioned the scroll itself
+-      // (with [SegmentSelectionAlignment.minimal] this no-ops when the
+-      // selection is already on screen; [SegmentSelectionAlignment.center]
+-      // seats it centered).
+-      _scrollToEnsureVisible(selIdx, animated: false);
+-    } else {
+-      WidgetsBinding.instance.addPostFrameCallback((_) => _measureTabs());
+-    }
++      final changed = widths.length != _tabWidths.length ||
++          List.generate(widths.length, (i) => i).any((i) =>
++              (widths[i] - _tabWidths[i]).abs() > .01 ||
++              (offsets[i] - _tabOffsets[i]).abs() > .01);
++      if (changed && _pressedPointers.isNotEmpty) {
++        _pointerStructureChanged = true;
++      }
++      final needsIndicator = changed || _indicatorGeometryDirty;
++      if (changed || _geometryPending || _morphSettling || needsIndicator ||
++          _viewportGeometryDirty) {
++        setState(() {
++          _tabWidths = widths;
++          _tabOffsets = offsets;
++          _geometryPending = false;
++          // Viewport/content dimensions can clamp ScrollPosition.pixels
++          // during layout without firing the controller's scroll listener.
++          // Rebuild the screen-relative lens after that layout even if its
++          // content-space widths and offsets did not change.
++          _viewportGeometryDirty = false;
++          // While a finger owns the lens, refresh hit geometry but leave the
++          // lens under the finger. Reconcile once that gesture finishes.
++          if (_isDragging || _isDraggingIndicator) {
++            _indicatorGeometryDirty = needsIndicator;
++            return;
++          }
++          _indicatorGeometryDirty = false;
++          if (_snapNextMeasure || _morphSettling) {
++            _indicatorEpoch++;
++            _indOffsetSpring.setValue(offsets[selIdx]);
++            _indWidthSpring.setValue(widths[selIdx]);
++          } else if (needsIndicator) {
++            // Keep the normal position follower and width spring alive.
++            // Their targets may move during a 200 ms text-style tween; an
++            // epoch snap here would erase every ordinary selection motion.
++            _indOffsetSpring.setValue(offsets[selIdx]);
++            _indWidthSpring.animateTo(widths[selIdx]);
++          }
++          _snapNextMeasure = false;
++          _morphSettling = false;
++        });
++      }
++      if (!_autoReveal) _revealAfterMeasure = false;
++      if (_revealAfterMeasure && _canReveal) {
++        _revealAfterMeasure = false;
++        _scrollToEnsureVisible(selIdx, animated: false);
++      }
++    }
++    // A not-yet-laid-out child will notify on its first layout. Do not create
++    // an unbounded post-frame retry loop for detached/offstage controls.
+   }
+ 
+   @override
+@@ -364,16 +504,20 @@
+   void didUpdateWidget(ScrollableSegmentContent oldWidget) {
+     super.didUpdateWidget(oldWidget);
+ 
+-    // Handle scrollController swap (e.g., parent provides a new controller).
++    // Change each registration once, even when controller AND mode change.
++    if (oldWidget.isScrollable &&
++        (!widget.isScrollable ||
++            oldWidget.scrollController != widget.scrollController)) {
++      oldWidget.scrollController.removeListener(_onScroll);
++    }
+     if (widget.isScrollable &&
+-        oldWidget.scrollController != widget.scrollController) {
+-      oldWidget.scrollController.removeListener(_onScroll);
++        (!oldWidget.isScrollable ||
++            oldWidget.scrollController != widget.scrollController)) {
+       widget.scrollController.addListener(_onScroll);
+     }
+ 
+     // Handle isScrollable toggling (unlikely in practice, but safe).
+     if (!oldWidget.isScrollable && widget.isScrollable) {
+-      widget.scrollController.addListener(_onScroll);
+       // Re-measure in scrollable mode — tab widths may differ.
+       setState(() {
+         _tabWidths = [];
+@@ -381,9 +525,9 @@
+       });
+       _indOffsetSpring.setValue(0);
+       _indWidthSpring.setValue(0);
++      _snapNextMeasure = true;
+       _initKeys();
+     } else if (oldWidget.isScrollable && !widget.isScrollable) {
+-      oldWidget.scrollController.removeListener(_onScroll);
+       // Re-measure in non-scrollable mode (expanded layout).
+       setState(() {
+         _tabWidths = [];
+@@ -391,6 +535,7 @@
+       });
+       _indOffsetSpring.setValue(0);
+       _indWidthSpring.setValue(0);
++      _snapNextMeasure = true;
+       _initKeys();
+     }
+ 
+@@ -401,8 +546,24 @@
+     // frame-by-frame: the scroll lunged toward the stale target while the
+     // morph anchor dragged it back).
+     final lengthChanged = oldWidget.tabs.length != widget.tabs.length;
+-    if (!lengthChanged &&
+-        oldWidget.selectedIndex != widget.selectedIndex &&
++    final identitiesChanged = lengthChanged ||
++        List.generate(widget.tabs.length, (i) => i).any((i) =>
++            _identityOf(oldWidget.tabs[i]) != _identityOf(widget.tabs[i]));
++    final selectionChanged =
++        oldWidget.selectedIndex != widget.selectedIndex ||
++        _identityOf(oldWidget.tabs[oldWidget.selectedIndex]) !=
++            _identityOf(widget.tabs[widget.selectedIndex]);
++    final interruptedMorph = _morphing &&
++        (identitiesChanged || selectionChanged ||
++            widget.isScrollable != oldWidget.isScrollable);
++    if (interruptedMorph) _finishMorph(jumpToEnd: true);
++    if (selectionChanged) {
++      _autoReveal = true;
++      _seatGen++;
++      _seatPending = false;
++    }
++    if (!identitiesChanged &&
++        selectionChanged &&
+         !_isDragging) {
+       setState(() {
+         _xAlign = _computeXAlignmentForTab(widget.selectedIndex);
+@@ -417,32 +578,49 @@
+       // Programmatic selection change — seat the new tab (immediately, or
+       // in the centering second beat).
+       if (widget.isScrollable) {
+-        WidgetsBinding.instance.addPostFrameCallback(
+-          (_) => _seatSelection(widget.selectedIndex),
+-        );
+-      }
+-    }
+-    if (lengthChanged) {
+-      if (_morphing) _finishMorph(jumpToEnd: true);
++        final generation = _seatGen;
++        _seatPending = true;
++        WidgetsBinding.instance.addPostFrameCallback((_) {
++          if (mounted && generation == _seatGen) {
++            _seatSelection(widget.selectedIndex);
++          }
++        });
++      }
++    }
++    if (identitiesChanged) {
++      if (_pressedPointers.isNotEmpty) _pointerStructureChanged = true;
++      _seatGen++;
++      _seatPending = false;
++      _isDragging = false;
++      _isDraggingIndicator = false;
++      _isDown = false;
+       final reduceMotion = GlassAccessibilityData.of(context).reduceMotion;
+-      if (widget.isScrollable &&
++      if (lengthChanged && !interruptedMorph && widget.isScrollable &&
+           !reduceMotion &&
+           widget.regridDuration > Duration.zero &&
+           _tryStartMorph(oldWidget.tabs)) {
+         return;
+       }
+-      setState(() {
+-        _xAlign = _computeXAlignmentForTab(widget.selectedIndex);
+-        _tabWidths = [];
+-        _tabOffsets = [];
+-      });
++      _xAlign = _computeXAlignmentForTab(widget.selectedIndex);
++      _snapNextMeasure |= lengthChanged;
+       // The springs deliberately KEEP their last geometry: zeroing them
+       // hid the pill for the remeasure gap and then made it travel in
+       // from the track edge. The pill holds its stale position for the
+       // remeasure frame and the epoch-snap in [_measureTabs] lands it on
+       // the new geometry with no travel.
+       _initKeys();
+-    }
++    } else if (_morphing) {
++      // Do not retain stale title/icon widgets for surviving IDs until the
++      // morph ends. Exiting cells alone keep their old presentation.
++      final current = <Object, GlassSegment>{
++        for (final tab in widget.tabs)
++          if (_identityOf(tab) != null) _identityOf(tab)!: tab,
++      };
++      _morphTabs = [
++        for (final tab in _morphTabs!) current[_identityOf(tab)] ?? tab,
++      ];
++    }
++    _scheduleMeasure();
+   }
+ 
+   static Object? _identityOf(GlassSegment t) => t.id ?? t.label;
+@@ -454,6 +632,8 @@
+   bool _tryStartMorph(List<GlassSegment> oldTabs) {
+     if (_tabWidths.length != oldTabs.length) return false;
+     if (!widget.scrollController.hasClients) return false;
++    if (_pressedPointers.isNotEmpty ||
++        widget.scrollController.position.isScrollingNotifier.value) return false;
+     final selId = _identityOf(widget.tabs[widget.selectedIndex]);
+     if (selId == null) return false;
+     final oldIds = [for (final t in oldTabs) _identityOf(t)];
+@@ -552,6 +732,11 @@
+     if (naturals == null) return false;
+     for (final i in _morphEntering!) {
+       if (i >= _tabKeys.length) return false;
++      final measured = _naturalWidths[_tabKeys[i]];
++      if (measured != null) {
++        naturals[i] = measured;
++        continue;
++      }
+       var box = _tabKeys[i].currentContext?.findRenderObject();
+       // Descend to the Align's child — the naturally-sized inner cell.
+       RenderBox? inner;
+@@ -634,7 +819,7 @@
+   // ===========================================================================
+ 
+   void _handleTapUp(TapUpDetails details) {
+-    if (_morphing) return; // sub-200ms; geometry is in flux
++    if (_morphing || _geometryPending || _pointerStructureChanged) return;
+     final box = context.findRenderObject() as RenderBox?;
+     if (box == null) return;
+ 
+@@ -663,7 +848,11 @@
+   }
+ 
+   void _handleDragDown(DragDownDetails details) {
+-    if (_morphing) return;
++    // The inner RawGestureDetector receives down before the outer Listener.
++    // Start a fresh gesture here as well, so a prior invalidated press cannot
++    // swallow the next lens drag before Listener records its new pointer.
++    if (_pressedPointers.isEmpty) _pointerStructureChanged = false;
++    if (_morphing || _geometryPending || _pointerStructureChanged) return;
+     if (!widget.isScrollable) {
+       setState(() => _isDown = true);
+       return;
+@@ -693,6 +882,7 @@
+   }
+ 
+   void _handleDragUpdate(DragUpdateDetails details) {
++    if (_morphing || _geometryPending || _pointerStructureChanged) return;
+     final box = context.findRenderObject() as RenderBox?;
+     if (box == null || box.size.width <= 0) return;
+     const double rubberBandFactor = 0.5;
+@@ -722,6 +912,7 @@
+ 
+     // --- SCROLLABLE MODE ---
+     if (!_isDraggingIndicator || _tabOffsets.isEmpty) return;
++    _userScroll();
+     setState(() {
+       _isDragging = true;
+       final double screenWidth = box.size.width;
+@@ -770,7 +961,8 @@
+   }
+ 
+   void _handleDragEnd(DragEndDetails details) {
+-    if (!_isDragging) {
++    if (!_isDragging || _morphing || _geometryPending ||
++        _pointerStructureChanged) {
+       _handleDragCancel();
+       return;
+     }
+@@ -818,6 +1010,12 @@
+       );
+     }
+ 
++    // A disabled segment may be crossed by the lens but never activated.
++    if (targetTabIndex < 0 || targetTabIndex >= widget.tabs.length ||
++        !widget.tabs[targetTabIndex].enabled) {
++      targetTabIndex = widget.selectedIndex;
++    }
++
+     setState(() {
+       _isDragging = false;
+       _isDraggingIndicator = false;
+@@ -834,6 +1032,8 @@
+       _indOffsetSpring.setValue(_tabOffsets[targetTabIndex]);
+       _indWidthSpring.animateTo(_tabWidths[targetTabIndex]);
+     }
++    _indicatorGeometryDirty = true;
++    _scheduleMeasure(reveal: false);
+   }
+ 
+   void _handleDragCancel() {
+@@ -845,10 +1045,15 @@
+         _xAlign = _computeXAlignmentForTab(widget.selectedIndex);
+       }
+     });
++    _indicatorGeometryDirty = true;
++    _scheduleMeasure(reveal: false);
+   }
+ 
+   void _onTabTap(int index) {
+-    if (!widget.tabs[index].enabled) return;
++    if (_morphing || _geometryPending || _pointerStructureChanged ||
++        index < 0 || index >= widget.tabs.length ||
++        !widget.tabs[index].enabled) return;
++    _autoReveal = true;
+     if (index != widget.selectedIndex) {
+       widget.onTabSelected(index);
+     }
+@@ -856,6 +1061,14 @@
+     if (widget.isScrollable) {
+       _seatSelection(index);
+     }
++  }
++
++  void _onCellTap(GlassSegment tab, int renderedIndex) {
++    final id = _identityOf(tab);
++    final index = id == null
++        ? renderedIndex
++        : widget.tabs.indexWhere((current) => _identityOf(current) == id);
++    _onTabTap(index);
+   }
+ 
+   /// Smoothly scrolls the [SingleChildScrollView] so that [tabIndex] is
+@@ -864,8 +1077,18 @@
+   /// Called on tap and on programmatic selection changes. Only fires when
+   /// measurements are ready and the controller has an attached position.
+   void _scrollToEnsureVisible(int tabIndex, {bool animated = true}) {
+-    if (!widget.scrollController.hasClients) return;
+-    if (tabIndex >= _tabOffsets.length || tabIndex >= _tabWidths.length) return;
++    if (!mounted || !widget.isScrollable || !_autoReveal ||
++        !widget.scrollController.hasClients) return;
++    if (_geometryPending || _morphing || tabIndex < 0 ||
++        tabIndex >= _tabOffsets.length || tabIndex >= _tabWidths.length) {
++      _revealAfterMeasure = true;
++      return;
++    }
++    if (!_canReveal) {
++      _revealAfterMeasure = true;
++      return;
++    }
++    _revealAfterMeasure = false;
+ 
+     final position = widget.scrollController.position;
+     final viewportWidth = position.viewportDimension;
+@@ -895,7 +1118,7 @@
+     );
+ 
+     if ((targetOffset - currentOffset).abs() > 0.5) {
+-      if (animated) {
++      if (animated && !GlassAccessibilityData.of(context).reduceMotion) {
+         widget.scrollController.animateTo(
+           targetOffset,
+           duration: const Duration(milliseconds: 300),
+@@ -991,7 +1214,7 @@
+       unselectedIconColor,
+     );
+ 
+-    return RawGestureDetector(
++    final content = RawGestureDetector(
+       gestures: {
+         HorizontalDragGestureRecognizer: GestureRecognizerFactoryWithHandlers<
+             HorizontalDragGestureRecognizer>(
+@@ -1169,16 +1392,33 @@
+ 
+                               // Tab labels (scrollable) — stableTabLabels is the ListenableBuilder
+                               // child: built once per full setState, reused across spring ticks.
+-                              NotificationListener<ScrollStartNotification>(
+-                                onNotification: (_) {
+-                                  if (_isDown) setState(() => _isDown = false);
++                              NotificationListener<ScrollMetricsNotification>(
++                                onNotification: (notification) {
++                                  if (notification.depth == 0) {
++                                    _viewportGeometryDirty = true;
++                                    _scheduleMeasure(reveal: false);
++                                  }
+                                   return false;
+                                 },
+-                                child: SingleChildScrollView(
+-                                  controller: widget.scrollController,
+-                                  scrollDirection: Axis.horizontal,
+-                                  physics: physics,
+-                                  child: effectiveTabLabels,
++                                child: NotificationListener<ScrollNotification>(
++                                  onNotification: (notification) {
++                                    if (notification.depth != 0) return false;
++                                    if (notification is ScrollStartNotification) {
++                                      if (notification.dragDetails != null) {
++                                        _userScroll();
++                                      }
++                                      if (_isDown) setState(() => _isDown = false);
++                                    } else if (notification is ScrollEndNotification) {
++                                      _scheduleMeasure(reveal: false);
++                                    }
++                                    return false;
++                                  },
++                                  child: SingleChildScrollView(
++                                    controller: widget.scrollController,
++                                    scrollDirection: Axis.horizontal,
++                                    physics: physics,
++                                    child: effectiveTabLabels,
++                                  ),
+                                 ),
+                               ),
+                             ],
+@@ -1222,6 +1462,27 @@
+         },
+       ),
+     );
++    return _SegmentSizeObserver(
++      onSizeChanged: _viewportSizeChanged,
++      child: Listener(
++        onPointerDown: (event) {
++          if (_pressedPointers.isEmpty) {
++            _pointerSequence++;
++            _pointerStructureChanged = false;
++          }
++          _pressedPointers.add(event.pointer);
++        },
++        onPointerUp: _pointerFinished,
++        onPointerCancel: _pointerFinished,
++        onPointerSignal: (event) {
++          if (event is PointerScrollEvent && event.scrollDelta != Offset.zero) {
++            _userScroll();
++          }
++        },
++        onPointerPanZoomStart: (_) => _userScroll(),
++        child: content,
++      ),
++    );
+   }
+ 
+   Widget _buildTabLabels(
+@@ -1237,17 +1498,21 @@
+       tabs.length,
+       (index) {
+         final tab = tabs[index];
++        final cellKey = _tabKeys[index];
+         final isSelected = index == selectedRenderIndex;
+-        Widget cell = RepaintBoundary(
+-          child: TabBarItem(
+-            tab: tab,
+-            isSelected: isSelected,
+-            onTap: () => _onTabTap(index),
+-            onTapDown: () {},
+-            labelStyle: isSelected ? selectedStyle : unselectedStyle,
+-            iconColor: isSelected ? selectedIconColor : unselectedIconColor,
+-            iconSize: widget.iconSize,
+-            padding: widget.labelPadding,
++        Widget cell = _SegmentSizeObserver(
++          onSizeChanged: (size) => _cellSizeChanged(cellKey, size),
++          child: RepaintBoundary(
++            child: TabBarItem(
++              tab: tab,
++              isSelected: isSelected,
++              onTap: () => _onCellTap(tab, index),
++              onTapDown: () {},
++              labelStyle: isSelected ? selectedStyle : unselectedStyle,
++              iconColor: isSelected ? selectedIconColor : unselectedIconColor,
++              iconSize: widget.iconSize,
++              padding: widget.labelPadding,
++            ),
+           ),
+         );
+         if (_morphing &&
+@@ -1273,7 +1538,7 @@
+             },
+           );
+         }
+-        return KeyedSubtree(key: _tabKeys[index], child: cell);
++        return KeyedSubtree(key: cellKey, child: cell);
+       },
+     );
+ 
+@@ -1311,6 +1576,45 @@
+           .map((tab) => tab is KeyedSubtree ? Expanded(child: tab) : tab)
+           .toList(),
+     );
++  }
++}
++
++// Observes natural cell/viewport dimensions without adding layout constraints,
++// rebuilding the child or introducing a paint layer. The listener only queues
++// a coalesced post-layout measurement; it never calls setState during layout.
++class _SegmentSizeObserver extends SingleChildRenderObjectWidget {
++  const _SegmentSizeObserver({
++    required this.onSizeChanged,
++    required super.child,
++  });
++
++  final ValueChanged<Size> onSizeChanged;
++
++  @override
++  _SegmentSizeRenderBox createRenderObject(BuildContext context) =>
++      _SegmentSizeRenderBox(onSizeChanged);
++
++  @override
++  void updateRenderObject(
++    BuildContext context,
++    _SegmentSizeRenderBox renderObject,
++  ) {
++    renderObject.onSizeChanged = onSizeChanged;
++  }
++}
++
++class _SegmentSizeRenderBox extends RenderProxyBox {
++  _SegmentSizeRenderBox(this.onSizeChanged);
++
++  ValueChanged<Size> onSizeChanged;
++  Size? _lastSize;
++
++  @override
++  void performLayout() {
++    super.performLayout();
++    if (size == _lastSize) return;
++    _lastSize = size;
++    onSizeChanged(size);
+   }
+ }
+ 
+--- a/lib/src/widgets/interactive/segmented_control_internal.dart
++++ b/lib/src/widgets/interactive/segmented_control_internal.dart
+@@ -409,7 +409,17 @@
+             duration: const Duration(milliseconds: 350),
+           ),
+           active: _isDragging,
+-          builder: (context, value, velocity, _) {
++          // Labels depend on this widget's configuration, not the alignment
++          // spring's ticks. Keep them through both animation builders; the
++          // active lens branch below still updates its contrasting colors.
++          child: _buildSegmentsFlex(
++            selectedStyle: selectedTextStyle,
++            unselectedStyle: unselectedTextStyle,
++            selectedIconColor: restingSelectedIconColor,
++            unselectedIconColor: unselectedIconColor,
++            animateSelectedTextStyle: true,
++          ),
++          builder: (context, value, velocity, restingSegments) {
+             final alignment = widget.direction == Axis.horizontal
+                 ? AlignmentDirectional(value, 0)
+                 : Alignment(0, value);
+@@ -503,13 +513,7 @@
+                   ],
+                 );
+               },
+-              child: _buildSegmentsFlex(
+-                selectedStyle: selectedTextStyle,
+-                unselectedStyle: unselectedTextStyle,
+-                selectedIconColor: restingSelectedIconColor,
+-                unselectedIconColor: unselectedIconColor,
+-                animateSelectedTextStyle: true,
+-              ),
++              child: restingSegments,
+             );
+           },
+         ),
+--- a/lib/widgets/interactive/glass_button.dart
++++ b/lib/widgets/interactive/glass_button.dart
+@@ -654,6 +654,16 @@
+     );
+   }
+ 
++  @override
++  void didUpdateWidget(covariant GlassButton oldWidget) {
++    super.didUpdateWidget(oldWidget);
++    if (oldWidget.enabled && !widget.enabled) {
++      // A press may end after the button is disabled, when its release
++      // handlers no longer run. Clear that press's ambient lift immediately.
++      _saturationController.value = 0;
++    }
++  }
++
+   // ---------------------------------------------------------------------------
+   // Keyboard activation — mirrors the touch press animation so sighted
+   // keyboard users receive the same visual feedback as touch users.
+@@ -1015,13 +1025,20 @@
+     final stretchWidget =
+         skipBoundary ? stretchContent : RepaintBoundary(child: stretchContent);
+ 
+-    // Apply opacity when disabled
+-    final innerWidget = widget.enabled
+-        ? stretchWidget
+-        : Opacity(
+-            opacity: 0.5,
++    // Transparent controls retain their stretch/glow state when enabled changes.
++    // Keep refractive surfaces' existing structure: even Opacity(1) is a
++    // backdrop-group boundary, so adding it there would alter glass grouping.
++    final innerWidget = widget.style == GlassButtonStyle.transparent
++        ? Opacity(
++            opacity: widget.enabled ? 1 : 0.5,
+             child: stretchWidget,
+-          );
++          )
++        : widget.enabled
++            ? stretchWidget
++            : Opacity(
++                opacity: 0.5,
++                child: stretchWidget,
++              );
+ 
+     // ---------------------------------------------------------------------------
+     // GlassFocusRegion abstracts the focus ring painting and keyboard intent
+--- a/lib/widgets/shared/glass_focus_region.dart
++++ b/lib/widgets/shared/glass_focus_region.dart
+@@ -1,4 +1,6 @@
+ import 'package:flutter/cupertino.dart';
++import 'package:flutter/scheduler.dart';
++
+ import 'glass_focus_ring_painter.dart';
+ 
+ /// A shared accessibility and focus region for interactive glass widgets.
+@@ -72,32 +74,31 @@
+   GlassFocusRegion.observe({
+     required this.child,
+     required FocusNode focusNode,
+-    required ShapeBorder
+-        shape, // non-nullable; field is ShapeBorder? so this.shape would widen the type
++    required ShapeBorder shape, // non-nullable; field is ShapeBorder? so this.shape would widen the type
+     super.key,
+-  })  : observedFocusNode = focusNode,
+-        enabled = true,
+-        shape = shape, // ignore: prefer_initializing_formals
+-        isFocusedNotifier = null,
+-        isHoveredNotifier = null,
+-        focusNode = null,
+-        canRequestFocus = false,
+-        autofocus = false,
+-        semanticLabel = null,
+-        isButton = false,
+-        isSlider = false,
+-        tracksSelection = false,
+-        isSelected = false,
+-        toggled = null,
+-        checked = null,
+-        onKeyboardActivate = null,
+-        semanticOnTap = null,
+-        semanticOnLongPress = null,
+-        semanticValue = null,
+-        semanticIncreasedValue = null,
+-        semanticDecreasedValue = null,
+-        semanticOnIncrease = null,
+-        semanticOnDecrease = null;
++  }) : observedFocusNode = focusNode,
++       enabled = true,
++       shape = shape, // ignore: prefer_initializing_formals
++       isFocusedNotifier = null,
++       isHoveredNotifier = null,
++       focusNode = null,
++       canRequestFocus = false,
++       autofocus = false,
++       semanticLabel = null,
++       isButton = false,
++       isSlider = false,
++       tracksSelection = false,
++       isSelected = false,
++       toggled = null,
++       checked = null,
++       onKeyboardActivate = null,
++       semanticOnTap = null,
++       semanticOnLongPress = null,
++       semanticValue = null,
++       semanticIncreasedValue = null,
++       semanticDecreasedValue = null,
++       semanticOnIncrease = null,
++       semanticOnDecrease = null;
+ 
+   // ── Shared fields ────────────────────────────────────────────────────────
+ 
+@@ -213,71 +214,142 @@
+   bool _hadRecentPointerEvent = false;
+   bool _suppressRing = false;
+ 
+-  late final ValueNotifier<bool> _isFocusedNotifier;
+-  late final ValueNotifier<bool> _isHoveredNotifier;
+-
+-  // null in observe mode; owned or adopted in interactive mode.
++  late ValueNotifier<bool> _isFocusedNotifier;
++  late ValueNotifier<bool> _isHoveredNotifier;
++
+   FocusNode? _internalFocusNode;
+-
++  FocusNode? _boundObservedNode;
++  bool _ownsFocusNode = false;
+   bool _ownsFocusNotifier = false;
+   bool _ownsHoverNotifier = false;
++  bool _focusHighlight = false;
++  bool _hoverHighlight = false;
++  bool _syncScheduled = false;
++  bool _disposed = false;
++  int _interactionEpoch = 0;
+ 
+   @override
+   void initState() {
+     super.initState();
+-
++    _createNotifiers();
++    _attachFocusSource();
++    if (!widget._isObserveMode) _onInteractiveFocusChange();
++  }
++
++  void _createNotifiers() {
++    final focus = widget._isObserveMode ? null : widget.isFocusedNotifier;
++    final hover = widget._isObserveMode ? null : widget.isHoveredNotifier;
++    _ownsFocusNotifier = focus == null;
++    _ownsHoverNotifier = hover == null;
++    _isFocusedNotifier = focus ?? ValueNotifier(_focusHighlight);
++    _isHoveredNotifier = hover ?? ValueNotifier(_hoverHighlight);
++  }
++
++  void _attachFocusSource() {
++    FocusManager.instance.addHighlightModeListener(_onHighlightModeChange);
+     if (widget._isObserveMode) {
+-      // Observe mode: listen to the external FocusNode; no FocusableActionDetector.
+-      // We also listen to FocusManager.highlightMode so the ring only shows for
+-      // keyboard-driven focus — not mouse clicks. This mirrors iOS 26 behaviour
+-      // where text field rings are only visible to keyboard/external-keyboard users.
+-      _isFocusedNotifier = ValueNotifier(false); // starts hidden
+-      _ownsFocusNotifier = true;
+-      _isHoveredNotifier = ValueNotifier(false);
+-      _ownsHoverNotifier = true;
+-      widget.observedFocusNode!.addListener(_onObservedFocusChange);
+-      FocusManager.instance.addHighlightModeListener(_onHighlightModeChange);
++      _boundObservedNode = widget.observedFocusNode;
++      _boundObservedNode!.addListener(_onObservedFocusChange);
++      _onObservedFocusChange();
++      _actions = const {};
+       return;
+     }
+-
+-    // Interactive mode.
+-    _internalFocusNode =
+-        widget.focusNode ?? FocusNode(canRequestFocus: widget.canRequestFocus);
+-    if (widget.focusNode != null) {
+-      widget.focusNode!.canRequestFocus = widget.canRequestFocus;
+-    }
+-    if (widget.isFocusedNotifier != null) {
+-      _isFocusedNotifier = widget.isFocusedNotifier!;
+-    } else {
+-      _isFocusedNotifier = ValueNotifier(false);
+-      _ownsFocusNotifier = true;
+-    }
+-    if (widget.isHoveredNotifier != null) {
+-      _isHoveredNotifier = widget.isHoveredNotifier!;
+-    } else {
+-      _isHoveredNotifier = ValueNotifier(false);
+-      _ownsHoverNotifier = true;
+-    }
++    _ownsFocusNode = widget.focusNode == null;
++    _internalFocusNode = widget.focusNode ?? FocusNode();
++    _internalFocusNode!.canRequestFocus = widget.canRequestFocus;
++    _internalFocusNode!.addListener(_onInteractiveFocusChange);
++    final epoch = _interactionEpoch;
+     _actions = <Type, Action<Intent>>{
+       ActivateIntent: CallbackAction<Intent>(
+         onInvoke: (Intent intent) {
+-          widget.onKeyboardActivate?.call();
++          if (_acceptInteraction(epoch) && widget.enabled) {
++            widget.onKeyboardActivate?.call();
++          }
+           return null;
+         },
+       ),
+     };
+   }
+ 
++  void _detachFocusSource() {
++    FocusManager.instance.removeHighlightModeListener(_onHighlightModeChange);
++    if (_boundObservedNode != null) {
++      _boundObservedNode!.removeListener(_onObservedFocusChange);
++      _boundObservedNode = null;
++    }
++    _internalFocusNode?.removeListener(_onInteractiveFocusChange);
++    if (_ownsFocusNode) _internalFocusNode?.dispose();
++    _internalFocusNode = null;
++    _ownsFocusNode = false;
++  }
++
++  void _disposeNotifiers() {
++    if (_ownsFocusNotifier) _isFocusedNotifier.dispose();
++    if (_ownsHoverNotifier) _isHoveredNotifier.dispose();
++  }
++
++  // These are outputs owned by the region. Keep the last emitted state here:
++  // a parent may already have disposed an old external notifier before update.
++  // A replacement must receive current state without dirtying an ancestor
++  // that listens to the new target while that ancestor is still building.
++  void _publishHighlights() {
++    if (_disposed) return;
++    if (SchedulerBinding.instance.schedulerPhase ==
++        SchedulerPhase.persistentCallbacks) {
++      if (_syncScheduled) return;
++      _syncScheduled = true;
++      WidgetsBinding.instance.addPostFrameCallback((_) {
++        _syncScheduled = false;
++        if (mounted && !_disposed) _publishHighlights();
++      });
++      return;
++    }
++    _isFocusedNotifier.value = _focusHighlight;
++    _isHoveredNotifier.value = _hoverHighlight;
++  }
++
++  void _setFocusHighlight(bool value) {
++    if (_disposed) return;
++    _focusHighlight = value;
++    _publishHighlights();
++  }
++
++  void _setHoverHighlight(bool value) {
++    if (_disposed) return;
++    _hoverHighlight = value;
++    _publishHighlights();
++  }
++
++  bool _acceptInteraction(int epoch) =>
++      mounted &&
++      !_disposed &&
++      !widget._isObserveMode &&
++      epoch == _interactionEpoch;
++
++  // FocusableActionDetector can retain its previous node's focus cache when
++  // the caller replaces a node. Read the actual source so the first focus on
++  // the replacement works without remounting the detector's child subtree.
++  void _onInteractiveFocusChange() {
++    if (_disposed || widget._isObserveMode) return;
++    _setFocusHighlight(
++      (_internalFocusNode?.hasFocus ?? false) &&
++          FocusManager.instance.highlightMode ==
++              FocusHighlightMode.traditional &&
++          widget.enabled &&
++          widget.canRequestFocus,
++    );
++  }
++
+   /// Called by the observed [FocusNode] listener in observe mode.
+   /// Only activates the ring when focus is keyboard-driven.
+   void _onObservedFocusChange() {
+-    if (!widget._isObserveMode) return;
+-
+-    final hasFocus = widget.observedFocusNode!.hasFocus;
++    if (_disposed || !widget._isObserveMode) return;
++
++    final hasFocus = _boundObservedNode?.hasFocus ?? false;
+ 
+     if (!hasFocus) {
+       _suppressRing = false;
+-      _isFocusedNotifier.value = false;
++      _setFocusHighlight(false);
+       return;
+     }
+ 
+@@ -290,72 +362,117 @@
+     final isKeyboard =
+         FocusManager.instance.highlightMode == FocusHighlightMode.traditional;
+ 
+-    _isFocusedNotifier.value = isKeyboard && !_suppressRing;
++    _setFocusHighlight(isKeyboard && !_suppressRing);
+   }
+ 
+   /// Called when the global highlight mode changes (e.g. user plugs in
+   /// a keyboard mid-session). Re-evaluates ring visibility immediately.
+   void _onHighlightModeChange(FocusHighlightMode mode) {
+-    if (!mounted || !widget._isObserveMode) return;
+-    final isKeyboard = mode == FocusHighlightMode.traditional;
+-    _isFocusedNotifier.value = (widget.observedFocusNode?.hasFocus ?? false) &&
+-        isKeyboard &&
+-        !_suppressRing;
++    if (!mounted || _disposed) return;
++    if (widget._isObserveMode) {
++      _onObservedFocusChange();
++    } else {
++      _onInteractiveFocusChange();
++    }
+   }
+ 
+   @override
+   void didUpdateWidget(covariant GlassFocusRegion oldWidget) {
+     super.didUpdateWidget(oldWidget);
+-
++    if (oldWidget._isObserveMode != widget._isObserveMode) {
++      _interactionEpoch++;
++      _detachFocusSource();
++      _disposeNotifiers();
++      _focusHighlight = false;
++      _hoverHighlight = false;
++      _suppressRing = false;
++      _hadRecentPointerEvent = false;
++      _createNotifiers();
++      _attachFocusSource();
++      if (!widget._isObserveMode) _onInteractiveFocusChange();
++      _publishHighlights();
++      return;
++    }
+     if (widget._isObserveMode) {
+-      // Rewire the listener if the caller swapped the focus node.
+-      if (oldWidget.observedFocusNode != widget.observedFocusNode) {
+-        oldWidget.observedFocusNode!.removeListener(_onObservedFocusChange);
+-        widget.observedFocusNode!.addListener(_onObservedFocusChange);
+-        _isFocusedNotifier.value = widget.observedFocusNode!.hasFocus;
++      if (_boundObservedNode != widget.observedFocusNode) {
++        _boundObservedNode!.removeListener(_onObservedFocusChange);
++        _boundObservedNode = widget.observedFocusNode;
++        _boundObservedNode!.addListener(_onObservedFocusChange);
++        // A suppression decision belongs to the old node. Retain an ongoing
++        // pointer press so the new node can make its own decision below.
++        _suppressRing = false;
++        _onObservedFocusChange();
+       }
+       return;
+     }
+-
+-    // Interactive mode.
+-    if (oldWidget.canRequestFocus != widget.canRequestFocus) {
++    var resync = false;
++    var focusSourceChanged = false;
++    if (oldWidget.focusNode != widget.focusNode) {
++      _interactionEpoch++;
++      _detachFocusSource();
++      _attachFocusSource();
++      focusSourceChanged = true;
++    } else if (oldWidget.canRequestFocus != widget.canRequestFocus) {
+       _internalFocusNode!.canRequestFocus = widget.canRequestFocus;
+-    }
++      focusSourceChanged = true;
++    }
++    if (oldWidget.isFocusedNotifier != widget.isFocusedNotifier) {
++      if (_ownsFocusNotifier) _isFocusedNotifier.dispose();
++      _ownsFocusNotifier = widget.isFocusedNotifier == null;
++      _isFocusedNotifier =
++          widget.isFocusedNotifier ?? ValueNotifier(_focusHighlight);
++      resync = true;
++    }
++    if (oldWidget.isHoveredNotifier != widget.isHoveredNotifier) {
++      if (_ownsHoverNotifier) _isHoveredNotifier.dispose();
++      _ownsHoverNotifier = widget.isHoveredNotifier == null;
++      _isHoveredNotifier =
++          widget.isHoveredNotifier ?? ValueNotifier(_hoverHighlight);
++      resync = true;
++    }
++    if (!widget.enabled &&
++        (oldWidget.enabled || _focusHighlight || _hoverHighlight)) {
++      _focusHighlight = false;
++      _hoverHighlight = false;
++      resync = true;
++    }
++    if (focusSourceChanged || oldWidget.enabled != widget.enabled) {
++      _onInteractiveFocusChange();
++    }
++    if (resync) _publishHighlights();
+   }
+ 
+   @override
+   void dispose() {
+-    if (widget._isObserveMode) {
+-      widget.observedFocusNode!.removeListener(_onObservedFocusChange);
+-      FocusManager.instance.removeHighlightModeListener(_onHighlightModeChange);
+-    } else {
+-      if (widget.focusNode == null) _internalFocusNode?.dispose();
+-    }
+-    if (_ownsFocusNotifier) _isFocusedNotifier.dispose();
+-    if (_ownsHoverNotifier) _isHoveredNotifier.dispose();
++    _disposed = true;
++    _interactionEpoch++;
++    _detachFocusSource();
++    _disposeNotifiers();
+     super.dispose();
+   }
+ 
+-  /// Wraps [child] in the iOS 26-style focus ring [Stack] when [isFocused]
+-  /// is true and [widget.shape] is non-null.
++  /// Keeps [child] in a stable [Stack] and adds the iOS 26-style focus ring
++  /// only when [isFocused] is true and [widget.shape] is non-null.
+   ///
+   /// Shared between interactive and observe mode to eliminate duplication.
+   Widget _buildRing(bool isFocused, Widget child) {
+-    if (!isFocused || widget.shape == null) return child;
++    if (widget.shape == null) return child;
+     return Stack(
++      fit: StackFit.passthrough,
+       clipBehavior: Clip.none,
+       children: [
+         child,
+-        Positioned.fill(
+-          child: IgnorePointer(
+-            child: CustomPaint(
+-              painter: GlassFocusRingPainter(
+-                color: CupertinoColors.activeBlue.resolveFrom(context),
+-                shape: widget.shape!,
++        if (isFocused)
++          Positioned.fill(
++            child: IgnorePointer(
++              child: CustomPaint(
++                painter: GlassFocusRingPainter(
++                  color: CupertinoColors.activeBlue.resolveFrom(context),
++                  shape: widget.shape!,
++                ),
+               ),
+             ),
+           ),
+-        ),
+       ],
+     );
+   }
+@@ -365,23 +482,48 @@
+   /// is not here, so a MouseRegion drives the hover notifier instead.
+   Widget _withHover(Widget child) {
+     if (!widget.enabled || widget.canRequestFocus) return child;
++    final epoch = _interactionEpoch;
+     return MouseRegion(
+-      onEnter: (_) => _isHoveredNotifier.value = true,
+-      onExit: (_) => _isHoveredNotifier.value = false,
++      onEnter: (_) {
++        if (_acceptInteraction(epoch) &&
++            widget.enabled &&
++            !widget.canRequestFocus) {
++          _setHoverHighlight(true);
++        }
++      },
++      onExit: (_) {
++        if (_acceptInteraction(epoch) &&
++            widget.enabled &&
++            !widget.canRequestFocus) {
++          _setHoverHighlight(false);
++        }
++      },
+       child: child,
+     );
+   }
+ 
+   @override
+   Widget build(BuildContext context) {
++    final epoch = _interactionEpoch;
++    bool acceptsObservedPointer() =>
++        mounted &&
++        !_disposed &&
++        widget._isObserveMode &&
++        epoch == _interactionEpoch;
+     // ── Observe mode ──────────────────────────────────────────────────────────
+     // No semantics wrapper, no FocusableActionDetector.
+     // The wrapped CupertinoTextField handles all of that itself.
+     if (widget._isObserveMode) {
+       return Listener(
+-        onPointerDown: (_) => _hadRecentPointerEvent = true,
+-        onPointerUp: (_) => _hadRecentPointerEvent = false,
+-        onPointerCancel: (_) => _hadRecentPointerEvent = false,
++        onPointerDown: (_) {
++          if (acceptsObservedPointer()) _hadRecentPointerEvent = true;
++        },
++        onPointerUp: (_) {
++          if (acceptsObservedPointer()) _hadRecentPointerEvent = false;
++        },
++        onPointerCancel: (_) {
++          if (acceptsObservedPointer()) _hadRecentPointerEvent = false;
++        },
+         child: ValueListenableBuilder<bool>(
+           valueListenable: _isFocusedNotifier,
+           builder: (context, isFocused, child) => _buildRing(isFocused, child!),
+@@ -405,15 +547,17 @@
+     //   text back to back.
+     final hasSemanticLabel =
+         widget.semanticLabel != null && widget.semanticLabel!.isNotEmpty;
+-    final content =
+-        hasSemanticLabel ? ExcludeSemantics(child: widget.child) : widget.child;
++    final content = hasSemanticLabel
++        ? ExcludeSemantics(child: widget.child)
++        : widget.child;
+ 
+     return Semantics(
+       // container: true creates an isolated semantics boundary so that the
+       // label and tap action stay on this node and are not merged into an
+       // ancestor container (which would concatenate the label with unrelated
+       // text, e.g. an app-bar title, and put the tap on a different node).
+-      container: widget.isButton ||
++      container:
++          widget.isButton ||
+           widget.isSlider ||
+           widget.checked != null ||
+           hasSemanticLabel,
+@@ -440,25 +584,41 @@
+       onIncrease: widget.semanticOnIncrease,
+       onDecrease: widget.semanticOnDecrease,
+       child: _withHover(
+-        FocusableActionDetector(
+-          // FocusableActionDetector writes its own `enabled` into the focus
+-          // node's canRequestFocus on every build, so canRequestFocus must be
+-          // folded in here or it is silently overridden (a non-focusable
+-          // region would still take keyboard focus and expose a focus node).
+-          enabled: widget.enabled && widget.canRequestFocus,
+-          focusNode: _internalFocusNode!,
+-          autofocus: widget.autofocus,
+-          actions: _actions,
+-          mouseCursor: widget.enabled
+-              ? SystemMouseCursors.click
+-              : SystemMouseCursors.basic,
+-          onShowFocusHighlight: (v) => _isFocusedNotifier.value = v,
+-          onShowHoverHighlight: (v) => _isHoveredNotifier.value = v,
+-          child: ValueListenableBuilder<bool>(
+-            valueListenable: _isFocusedNotifier,
+-            builder: (context, isFocused, child) =>
+-                _buildRing(isFocused, child!),
+-            child: content,
++        // FAD conditionally inserts its own Actions when enabled changes,
++        // reparenting its entire child tree through a GlobalKey. Keep this
++        // wrapper stable instead; an empty map preserves ancestor fallback
++        // while this region is disabled or cannot request keyboard focus.
++        Actions(
++          actions: widget.enabled && widget.canRequestFocus
++              ? _actions
++              : const <Type, Action<Intent>>{},
++          child: FocusableActionDetector(
++            // FocusableActionDetector writes its own `enabled` into the focus
++            // node's canRequestFocus on every build, so canRequestFocus must be
++            // folded in here or it is silently overridden (a non-focusable
++            // region would still take keyboard focus and expose a focus node).
++            enabled: widget.enabled && widget.canRequestFocus,
++            focusNode: _internalFocusNode!,
++            autofocus: widget.autofocus,
++            mouseCursor: widget.enabled
++                ? SystemMouseCursors.click
++                : SystemMouseCursors.basic,
++            onShowFocusHighlight: (_) {
++              if (_acceptInteraction(epoch)) {
++                _onInteractiveFocusChange();
++              }
++            },
++            onShowHoverHighlight: (v) {
++              if (_acceptInteraction(epoch) && widget.canRequestFocus) {
++                _setHoverHighlight(v && widget.enabled);
++              }
++            },
++            child: ValueListenableBuilder<bool>(
++              valueListenable: _isFocusedNotifier,
++              builder: (context, isFocused, child) =>
++                  _buildRing(isFocused, child!),
++              child: content,
++            ),
+           ),
+         ),
+       ),

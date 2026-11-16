@@ -8,35 +8,37 @@ struct FriendLinksPane: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 12) {
-                Button(action: returnToForum) { DeskLabel(returnTitle, systemImage: "chevron.left") }
-                    .buttonStyle(.bordered)
-                Text("友情链接").font(.headline).accessibilityAddTraits(.isHeader)
-                Spacer()
+            DeskGlassGroup {
+                HStack(spacing: 14) {
+                    Button(action: returnToForum) { DeskLabel(returnTitle, systemImage: "chevron.left") }
+                        .deskGlassButtonStyle().controlSize(.large)
+                    Text("友情链接").font(.system(size: 23, weight: .bold)).accessibilityAddTraits(.isHeader)
+                    Spacer()
+                }
             }
-            .padding(.horizontal, 20).padding(.vertical, 13)
-            .background(palette.chrome)
-            Rectangle().fill(palette.line).frame(height: 1)
+            .padding(.horizontal, 24).padding(.top, 20).padding(.bottom, 16)
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     Text("感谢以下伙伴对本项目的支持，排名不分先后。")
-                        .font(.title3.weight(.medium))
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 242), spacing: 16)], spacing: 16) {
-                        ForEach(Self.partners) { partner in card(partner) }
+                        .font(.system(size: 13)).foregroundStyle(.secondary)
+                    DeskGlassGroup {
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 242), spacing: 16)], spacing: 16) {
+                            ForEach(Self.partners) { partner in card(partner) }
+                        }
                     }
                 }
                 .frame(maxWidth: 990, alignment: .leading)
-                .padding(24)
+                .padding(.horizontal, 24).padding(.top, 4).padding(.bottom, 24)
                 .frame(maxWidth: .infinity)
             }
         }
-        .background(palette.reader)
+        .background(palette.chrome)
     }
 
     private func card(_ partner: Partner) -> some View {
-        let shape = RoundedRectangle(cornerRadius: 14)
-        return VStack(alignment: .leading, spacing: 14) {
+        let shape = RoundedRectangle(cornerRadius: 18, style: .continuous)
+        return VStack(alignment: .leading, spacing: 16) {
             HStack(spacing: 13) {
                 Group {
                     if let image = partner.image {
@@ -57,26 +59,27 @@ struct FriendLinksPane: View {
             Text(partner.description)
                 .font(.callout)
                 .foregroundStyle(.secondary)
-                .lineLimit(2, reservesSpace: true)
+                .lineSpacing(3).fixedSize(horizontal: false, vertical: true)
 
-            HStack(spacing: 7) {
+            HStack(spacing: 8) {
                 if let website = partner.website {
                     Link(destination: website) { DeskLabel("官网", systemImage: "arrow.up.right") }
                         .accessibilityLabel("\(partner.name) 官网")
                         .help(website.absoluteString)
                 }
-                Link(destination: partner.telegram) {
-                    DeskLabel("Telegram 群组", systemImage: "paperplane")
+                if let telegram = partner.telegram {
+                    Link(destination: telegram) {
+                        DeskLabel("Telegram 群组", systemImage: "paperplane")
+                    }
+                    .accessibilityLabel("\(partner.name) Telegram 群组")
+                    .help(telegram.absoluteString)
                 }
-                .accessibilityLabel("\(partner.name) Telegram 群组")
-                .help(partner.telegram.absoluteString)
             }
-            .buttonStyle(.bordered)
+            .buttonStyle(.bordered).controlSize(.regular)
         }
         .padding(18)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(palette.list, in: shape)
-        .overlay { shape.strokeBorder(palette.line).allowsHitTesting(false) }
+        .deskGlass(in: shape, solid: palette.list)
         .accessibilityElement(children: .contain)
     }
 
@@ -84,7 +87,7 @@ struct FriendLinksPane: View {
         let name: String
         let description: String
         let website: URL?
-        let telegram: URL
+        let telegram: URL?
         var id: String { name }
 
         var image: NSImage? {
@@ -102,5 +105,8 @@ struct FriendLinksPane: View {
         Partner(name: "PickMyVPS", description: "自购 400+ 台热门线路 / 落地机探针站",
                 website: URL(string: "https://www.pickmyvps.com/")!,
                 telegram: URL(string: "https://t.me/PickMyVPS_Group")!),
+        Partner(name: "CowCode", description: "下一代AI全聚合中转平台 主流模型 0.1x 起",
+                website: URL(string: "https://cowcode.top/r/cshaizhihao")!,
+                telegram: nil),
     ]
 }

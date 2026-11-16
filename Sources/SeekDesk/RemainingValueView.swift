@@ -89,7 +89,6 @@ private struct RemainingValueView: View {
                     .keyboardShortcut(.cancelAction).accessibilityLabel("关闭估价")
             }
             .padding(.horizontal, 16).padding(.vertical, 12)
-            Rectangle().fill(palette.line).frame(height: 1)
             ScrollView {
                 VStack(alignment: .leading, spacing: 15) {
                     ticket
@@ -104,7 +103,7 @@ private struct RemainingValueView: View {
             }
         }
         .frame(width: 430, height: 598)
-        .background(palette.reader)
+        .deskGlass(in: RoundedRectangle(cornerRadius: 20), solid: palette.chrome)
         .task(id: request) { await load(request) }
         .onChange(of: pair) { previous, current in
             fields.manualRate = ""
@@ -220,11 +219,12 @@ private struct RemainingValueView: View {
             if pair.isSame {
                 Text("同币种，无需换算。").font(.caption).foregroundStyle(.secondary)
             } else {
-                Picker("汇率方式", selection: $fields.mode) {
-                    Text("自动报价").tag(ValueRateMode.auto)
-                    Text("手动汇率").tag(ValueRateMode.manual)
+                DeskGlassPicker(values: [ValueRateMode.auto, .manual], selection: $fields.mode,
+                                tint: palette.accent, solid: palette.selection, compact: true) { mode, _ in
+                    Text(mode == .auto ? "自动报价" : "手动汇率")
+                        .font(.system(size: 12, weight: .medium))
                 }
-                .pickerStyle(.segmented).labelsHidden()
+                .accessibilityLabel("汇率方式")
                 if fields.mode == .manual {
                     HStack(spacing: 7) {
                         Text("1 \(pair.base) =").monospacedDigit()
@@ -373,7 +373,7 @@ private struct RemainingValueView: View {
     private struct RateRequest: Equatable { let pair: ValueCurrencyPair; let auto: Bool; let revision: Int }
 }
 
-private enum ValueRateMode { case auto, manual }
+private enum ValueRateMode: Hashable { case auto, manual }
 
 @MainActor private final class ValueCalculatorFields: ObservableObject {
     @Published var amount = ""

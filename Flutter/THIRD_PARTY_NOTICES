@@ -1,0 +1,185 @@
+SEEKDESK FLUTTER THIRD-PARTY NOTICES
+====================================
+
+SeekDesk is distributed under the repository's GPL-3.0-only license. The following
+third-party components retain their own copyright notices and license terms.
+Versions below match Flutter/pubspec.lock. Flutter also generates a complete
+runtime package license registry in flutter_assets/NOTICES.Z inside App.framework.
+Native Sparkle, Yams, libyaml and Xray licenses are copied separately to the app's
+Contents/Resources directory by scripts/copy-native-resources.sh.
+
+
+------------------------------------------------------------------------------
+liquid_glass_widgets 1.17.3
+Source: https://github.com/sdegenaar/liquid_glass_widgets
+SeekDesk uses the pinned runtime source in Vendor/liquid_glass_widgets with a
+local scrollable-segment geometry correction. Original renderer and shaders are
+unchanged. Source provenance and patch details: SEEKDESK_PATCHES.txt in that
+directory. The upstream version identifies the base release, not an upstream
+endorsement of the local change.
+
+MIT License
+
+Copyright (c) 2024–2026 Sebastian Degenaar
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+------------------------------------------------------------------------------
+Vendored rendering engine and motor spring utilities
+Source: https://github.com/whynotmake-it/flutter_liquid_glass
+
+THIRD-PARTY NOTICES
+===================
+
+This file contains the complete copyright notices and license terms for
+third-party works vendored or adapted within liquid_glass_widgets.
+
+────────────────────────────────────────────────────────────────────────────────
+1. liquid_glass_renderer
+────────────────────────────────────────────────────────────────────────────────
+
+Source:  https://github.com/whynotmake-it/flutter_liquid_glass/tree/main/packages/liquid_glass_renderer
+Version: 0.2.0-dev.4 (vendored 2026-03-28)
+
+The foundational rendering engine in lib/src/engine/ is derived from
+liquid_glass_renderer by Tim Lehmann for whynotmake.it. It has been
+extensively evolved and maintained in-tree (pure Flutter SDK conversion,
+bug fixes, performance improvements, and shader optimisations).
+
+MIT License
+
+Copyright 2025 Tim Lehmann for whynotmake.it
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+────────────────────────────────────────────────────────────────────────────────
+2. motor
+────────────────────────────────────────────────────────────────────────────────
+
+Source:  https://github.com/whynotmake-it/rivership/tree/main/packages/motor
+Version: 1.1.0
+
+The spring animation utilities in lib/utils/glass_spring.dart are derived from
+the motor package by Tim Lehmann for whynotmake.it. The adapted code implements
+an equivalent subset of motor's spring presets (CupertinoMotion) and controller
+types (SingleMotionController, SingleMotionBuilder, VelocityMotionBuilder) using
+Flutter's built-in physics primitives.
+
+MIT License
+
+Copyright (c) 2024 Tim Lehmann for whynotmake.it
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+────────────────────────────────────────────────────────────────────────────────
+
+For a detailed description of what was vendored and what patches were applied,
+see lib/src/engine/ATTRIBUTION.md and the header comments in
+lib/utils/glass_spring.dart.
+
+
+------------------------------------------------------------------------------
+cupertino_icons 1.0.8
+Source: https://github.com/flutter/packages/tree/main/third_party/packages/cupertino_icons
+
+The MIT License (MIT)
+
+Copyright (c) 2016 Vladimir Kharlampidi
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software is furnished to do so,
+subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+------------------------------------------------------------------------------
+markdown 7.3.0
+Source: https://github.com/dart-lang/markdown
+
+Copyright 2012, the Dart project authors. 
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are
+met:
+
+    * Redistributions of source code must retain the above copyright
+      notice, this list of conditions and the following disclaimer.
+    * Redistributions in binary form must reproduce the above
+      copyright notice, this list of conditions and the following
+      disclaimer in the documentation and/or other materials provided
+      with the distribution.
+    * Neither the name of Google LLC nor the names of its
+      contributors may be used to endorse or promote products derived
+      from this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+

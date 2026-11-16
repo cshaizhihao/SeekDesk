@@ -1,5 +1,120 @@
 import Foundation
 
+/// The parser is pure; keep both parsing and full-source cache lookups off the
+/// UI actor. Cancellation discards a running parse, but does not interrupt it.
+enum MarkdownPreviewParsing {
+    private static let cache = Cache()
+    private static let worker = Worker()
+
+    static func blocks(for source: String) async throws -> [MarkdownPreviewDocument.Block] {
+        try Task.checkCancellation()
+        let epoch = cache.currentEpoch()
+        let result = try await worker.blocks(for: source, epoch: epoch)
+        try Task.checkCancellation()
+        return result
+    }
+
+    static func removeAll() { cache.removeAll() }
+
+    /// A synchronous actor method serializes actual parsing. Cancelled queued
+    /// requests exit before parsing instead of spawning parallel obsolete work.
+    private actor Worker {
+        func blocks(for source: String, epoch: UInt64) throws -> [MarkdownPreviewDocument.Block] {
+            try Task.checkCancellation()
+            if let saved = cache.value(for: source, epoch: epoch) { return saved }
+            let result = MarkdownPreviewDocument.blocks(source)
+            try Task.checkCancellation()
+            cache.insert(result, for: source, epoch: epoch)
+            return result
+        }
+    }
+
+    private final class Cache: @unchecked Sendable {
+        private struct Entry {
+            let blocks: [MarkdownPreviewDocument.Block]
+            let cost: Int
+        }
+        private let lock = NSLock()
+        private var values: [String: Entry] = [:]
+        private var order: [String] = []
+        private var totalCost = 0
+        private var epoch: UInt64 = 0
+
+        func currentEpoch() -> UInt64 {
+            lock.lock()
+            defer { lock.unlock() }
+            return epoch
+        }
+
+        func removeAll() {
+            lock.lock()
+            defer { lock.unlock() }
+            epoch &+= 1
+            values.removeAll()
+            order.removeAll()
+            totalCost = 0
+        }
+
+        func value(for source: String, epoch expectedEpoch: UInt64) -> [MarkdownPreviewDocument.Block]? {
+            lock.lock()
+            defer { lock.unlock() }
+            guard epoch == expectedEpoch, let entry = values[source] else { return nil }
+            order.removeAll { $0 == source }
+            order.append(source)
+            return entry.blocks
+        }
+
+        func insert(_ blocks: [MarkdownPreviewDocument.Block], for source: String, epoch expectedEpoch: UInt64) {
+            let bytes = source.utf8.count
+            // Estimated source/string/array storage, not exact heap usage or RSS.
+            // Large reports still parse normally without displacing small drafts.
+            guard bytes <= 128 * 1024 else { return }
+            let cost = 1024 + bytes * 2 + Self.estimatedCost(blocks)
+            guard cost <= 4 * 1024 * 1024 else { return }
+            lock.lock()
+            defer { lock.unlock() }
+            guard epoch == expectedEpoch else { return }
+            if let old = values.removeValue(forKey: source) { totalCost -= old.cost }
+            order.removeAll { $0 == source }
+            while order.count >= 4 || totalCost + cost > 4 * 1024 * 1024 {
+                guard !order.isEmpty else { break }
+                let oldest = order.removeFirst()
+                if let old = values.removeValue(forKey: oldest) { totalCost -= old.cost }
+            }
+            values[source] = Entry(blocks: blocks, cost: cost)
+            order.append(source)
+            totalCost += cost
+        }
+
+        private static func estimatedCost(_ blocks: [MarkdownPreviewDocument.Block]) -> Int {
+            blocks.reduce(64 + blocks.count * MemoryLayout<MarkdownPreviewDocument.Block>.stride) { cost, block in
+                switch block {
+                case .line(let text, _), .code(let text):
+                    return cost + 32 + text.utf8.count * 2
+                case .table(let columns, let rows):
+                    return cost + stringsCost(columns) + rows.reduce(64) { $0 + stringsCost($1) }
+                case .terminal(let lines):
+                    return cost + lines.reduce(64) { cost, spans in
+                        cost + spans.reduce(64 + spans.count * MemoryLayout<ForumTerminalSpan>.stride) { cost, span in
+                            cost + 96 + (span.text.utf8.count + (span.foreground?.utf8.count ?? 0)
+                                + (span.background?.utf8.count ?? 0)) * 2
+                        }
+                    }
+                case .tabs(let tabs):
+                    return cost + tabs.reduce(64 + tabs.count * MemoryLayout<MarkdownPreviewDocument.Tab>.stride) {
+                        $0 + 32 + $1.label.utf8.count * 2 + estimatedCost($1.blocks)
+                    }
+                case .divider: return cost
+                }
+            }
+        }
+
+        private static func stringsCost(_ values: [String]) -> Int {
+            values.reduce(64 + values.count * MemoryLayout<String>.stride) { $0 + 32 + $1.utf8.count * 2 }
+        }
+    }
+}
+
 enum MarkdownPreviewDocument {
     enum LineKind: Equatable { case body, heading(Int), quote }
     enum Block: Equatable {
@@ -258,8 +373,8 @@ enum MarkdownPreviewDocument {
         return result
     }
 
-    static func imageReferences(_ markdown: String, selected: Set<URL>) -> [ImageReference] {
-        guard !selected.isEmpty else { return [] }
+    static func imageReferences(_ markdown: String, selected: Set<URL>? = nil) -> [ImageReference] {
+        if let selected, selected.isEmpty { return [] }
         let source = markdown as NSString
         var result: [ImageReference] = []
         var offset = 0
@@ -283,7 +398,7 @@ enum MarkdownPreviewDocument {
                 opening = (rawBlock as NSString).substring(with: marker.range(at: 1))
             } else if !block.hasPrefix("    "), !block.hasPrefix("\t") {
                 for asset in assets(line) {
-                    guard let span = asset.destination, !asset.sticker, selected.contains(asset.url) else { continue }
+                    guard let span = asset.destination, !asset.sticker, selected?.contains(asset.url) != false else { continue }
                     result.append(ImageReference(url: asset.url,
                         destination: NSRange(location: offset + span.location, length: span.length)))
                 }
@@ -291,6 +406,15 @@ enum MarkdownPreviewDocument {
             offset = end
         }
         return result
+    }
+
+    /// Publish-size controls must use the same supported references that the
+    /// preparation step can rewrite, rather than another Markdown parser's set.
+    static func imageURLs(_ markdown: String) -> [URL] {
+        var seen = Set<URL>()
+        return imageReferences(markdown).compactMap { reference in
+            seen.insert(reference.url).inserted ? reference.url : nil
+        }
     }
 
     static func replacingImages(_ markdown: String, references: [ImageReference], with links: [URL: URL]) -> String {

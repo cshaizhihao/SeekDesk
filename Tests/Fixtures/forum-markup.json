@@ -1,0 +1,80 @@
+[
+  {
+    "name": "ordinary decoded characters",
+    "html": "<p>用&quot;胖子&quot;，A &amp; B &lt;T&gt; '单引号'</p>",
+    "blocks": [{"kind":"text","text":"用\"胖子\"，A \\& B \\<T\\> '单引号'"}],
+    "visible": ["用\"胖子\"，A & B <T> '单引号'"]
+  },
+  {
+    "name": "literal entity names and Unicode",
+    "html": "<p>&amp;quot; &amp;amp; &amp;#34; &amp;#x1F525; &amp;bogus; &#34; &#x1F525; &amp;lt;code&amp;gt;</p>",
+    "blocks": [{"kind":"text","text":"\\&quot; \\&amp; \\&#34; \\&#x1F525; \\&bogus; \" 🔥 \\&lt;code\\&gt;"}],
+    "visible": ["&quot; &amp; &#34; &#x1F525; &bogus; \" 🔥 &lt;code&gt;"]
+  },
+  {
+    "name": "inline and fenced code remain literal",
+    "html": "<p><code>&quot; A &amp; B &lt;T&gt; &amp;quot; \\path</code></p><pre><code>&amp;quot; &lt;code&gt; *literal* \\path</code></pre>",
+    "blocks": [{"kind":"text","text":"`\" A & B <T> &quot; \\path`"},{"kind":"code","text":"&quot; <code> *literal* \\path"}],
+    "visible": ["\" A & B <T> &quot; \\path","&quot; <code> *literal* \\path"]
+  },
+  {
+    "name": "decorated link text and exact destination",
+    "html": "<p><a href='https://example.invalid/?a=1&amp;b=2&amp;amp;literal=3'><strong>&quot;A &amp; B&quot;</strong></a></p>",
+    "blocks": [{"kind":"text","text":"[**\"A \\& B\"**](<https://example.invalid/?a=1&amp;b=2&amp;amp;literal=3>)"}],
+    "visible": ["\"A & B\""],
+    "link": "https://example.invalid/?a=1&b=2&amp;literal=3"
+  },
+  {
+    "name": "fenced code preserves bounded language hint",
+    "html": "<pre><code class='hljs language-BASH'>echo &quot;hello&quot;\n</code></pre><pre class='language-json'><code>{&quot;ok&quot;: true}</code></pre><pre><code class='lang-C++'>int value = 1;</code></pre>",
+    "blocks": [{"kind":"code","text":"echo \"hello\"","language":"bash"},{"kind":"code","text":"{\"ok\": true}","language":"json"},{"kind":"code","text":"int value = 1;","language":"c++"}],
+    "visible": ["echo \"hello\"","{\"ok\": true}","int value = 1;"]
+  },
+  {
+    "name": "language data attribute and literal body stay separate",
+    "html": "<pre data-language='YAML'>path: &lt;literal&gt;</pre><pre><code data-lang='Python'>print(&quot;ok&quot;)</code></pre>",
+    "blocks": [{"kind":"code","text":"path: <literal>","language":"yaml"},{"kind":"code","text":"print(\"ok\")","language":"python"}],
+    "visible": ["path: <literal>","print(\"ok\")"]
+  },
+  {
+    "name": "invalid and oversized language hints fall back to plain code",
+    "html": "<pre><code class='language-javascript:alert(1)' data-language='not a language'>literal()</code></pre><pre><code class='language-abcdefghijklmnopqrstuvwxyz0123456789'>long hint</code></pre><pre><code>unlabelled</code></pre>",
+    "blocks": [{"kind":"code","text":"literal()"},{"kind":"code","text":"long hint"},{"kind":"code","text":"unlabelled"}],
+    "visible": ["literal()","long hint","unlabelled"]
+  },
+  {
+    "name": "heading quote caption and image fallback",
+    "html": "<h2>&quot;标题&quot; &amp; A</h2><blockquote><p>&amp;quot; <em>&amp; B</em></p></blockquote><table><caption>&amp;quot; &amp; 标题</caption></table><p><img src='javascript:bad' alt='&amp;quot; &amp; 图片'></p>",
+    "blocks": [{"kind":"heading","text":"\"标题\" \\& A"},{"kind":"quote","text":"\\&quot; *\\& B*"},{"kind":"text","text":"\\&quot; \\& 标题"},{"kind":"text","text":"\\&quot; \\& 图片"}],
+    "visible": ["\"标题\" & A","&quot; & B","&quot; & 标题","&quot; & 图片"]
+  },
+  {
+    "name": "plain table cells",
+    "html": "<table><tr><th>&amp;quot;</th><th>*literal*</th></tr><tr><td>&quot; A &amp; B</td><td>[label](https://example.invalid/) &lt;T&gt;</td></tr></table>",
+    "blocks": [{"kind":"table","text":"","rows":[["&quot;","*literal*"],["\" A & B","[label](https://example.invalid/) <T>"]]}],
+    "visible": ["&quot;","*literal*","\" A & B","[label](https://example.invalid/) <T>"]
+  },
+  {
+    "name": "plain warning and DOM signature",
+    "html": "<p>正文</p>",
+    "warning": "&amp;quot; &quot;警告&quot; *literal* &amp; A",
+    "signature": "<p>&quot;签名&quot; &amp;quot; <strong>&amp; B</strong></p>",
+    "blocks": [{"kind":"text","text":"正文"},{"kind":"notice","text":"&quot; \"警告\" *literal* & A"}],
+    "visible": ["正文","&quot; \"警告\" *literal* & A"],
+    "signatureMarkdown": "\"签名\" \\&quot; **\\& B**",
+    "signatureVisible": "\"签名\" &quot; & B"
+  },
+  {
+    "name": "plain URLs emails and backslashes",
+    "html": "<p>https://example.invalid/:smile:?a=1&amp;b=2 www.example.invalid/:+1:?x=&amp;quot; user@example.invalid \\&amp;quot;</p>",
+    "blocks": [{"kind":"text","text":"https\\://example\\.invalid/\\:smile\\:?a=1\\&b=2 www\\.example\\.invalid/\\:+1\\:?x=\\&quot; user@example\\.invalid \\\\\\&quot;"}],
+    "visible": ["https://example.invalid/:smile:?a=1&b=2 www.example.invalid/:+1:?x=&quot; user@example.invalid \\&quot;"]
+  },
+  {
+    "name": "nested report content",
+    "html": "<div class='nsk-magic-tabs'><div class='nsk-magic-tab-title'>Tab &amp;quot;</div><div class='nsk-magic-tab-body is-active'><p>&amp;quot; &amp; A</p><details open><summary>More &amp;quot;</summary><p>&quot;Nested&quot; &amp; B</p></details></div></div>",
+    "blocks": [{"kind":"tabs","text":"","tabs":[{"label":"Tab &quot;","blocks":[{"kind":"text","text":"\\&quot; \\& A"},{"kind":"disclosure","text":"More &quot;","tabs":[{"label":"","blocks":[{"kind":"text","text":"\"Nested\" \\& B"}]}]}]}]}],
+    "visible": ["&quot; & A","\"Nested\" & B"],
+    "disclosure": "More &quot;"
+  }
+]

@@ -15,6 +15,8 @@ struct OfficeCoverView: View {
                     .keyboardShortcut(extensions.shortcut, modifiers: [.command, .shift])
             }
             .padding(.leading, 83).padding(.trailing, 18).frame(height: 53)
+            .buttonStyle(DeskButtonStyle())
+            .deskGlass(in: Rectangle(), solid: palette.chrome)
             Divider()
             ScrollView([.horizontal, .vertical]) {
                 Grid(alignment: .leading, horizontalSpacing: 1, verticalSpacing: 1) {
@@ -35,6 +37,7 @@ struct OfficeCoverView: View {
             }
         }
         .background(palette.reader)
+        .accessibilityElement(children: .contain)
         .accessibilityLabel("办公视图")
     }
 

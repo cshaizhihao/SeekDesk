@@ -1,0 +1,93 @@
+[
+  {
+    "name":"list paragraphs share their item marker",
+    "html":"<p>Before</p><ul><li>Direct</li><li><p>Wrapped</p><p>Continuation</p></li><li><div>Div wrapped</div></li></ul><p>After</p>",
+    "blocks":[{"kind":"text","text":"Before"},{"kind":"list","text":"","items":[{"marker":"•","blocks":[{"kind":"text","text":"Direct"}]},{"marker":"•","blocks":[{"kind":"text","text":"Wrapped"},{"kind":"text","text":"Continuation"}]},{"marker":"•","blocks":[{"kind":"text","text":"Div wrapped"}]}]},{"kind":"text","text":"After"}],
+    "visible":["Before","Direct","Wrapped","Continuation","Div wrapped","After"]
+  },
+  {
+    "name":"mixed nested lists preserve parent continuation",
+    "html":"<ul><li><p>Parent</p><ol start='3'><li><p>Inner first</p><ul><li>Deep child</li></ul></li><li>Inner second</li></ol><p>Parent continuation</p></li><li>Sibling</li></ul>",
+    "blocks":[{"kind":"list","text":"","items":[{"marker":"•","blocks":[{"kind":"text","text":"Parent"},{"kind":"list","text":"","items":[{"marker":"3.","blocks":[{"kind":"text","text":"Inner first"},{"kind":"list","text":"","items":[{"marker":"•","blocks":[{"kind":"text","text":"Deep child"}]}]}]},{"marker":"4.","blocks":[{"kind":"text","text":"Inner second"}]}]},{"kind":"text","text":"Parent continuation"}]},{"marker":"•","blocks":[{"kind":"text","text":"Sibling"}]}]}],
+    "visible":["Parent","Inner first","Deep child","Inner second","Parent continuation","Sibling"]
+  },
+  {
+    "name":"ordered zero reset and two digit numbering",
+    "html":"<ol start='0'><li>Zero</li><li value='9'>Nine</li><li>Ten</li></ol>",
+    "blocks":[{"kind":"list","text":"","items":[{"marker":"0.","blocks":[{"kind":"text","text":"Zero"}]},{"marker":"9.","blocks":[{"kind":"text","text":"Nine"}]},{"marker":"10.","blocks":[{"kind":"text","text":"Ten"}]}]}],
+    "visible":["Zero","Nine","Ten"]
+  },
+  {
+    "name":"negative and invalid ordered starts",
+    "html":"<ol start='-2'><li>Negative two</li><li>Negative one</li></ol><ol start='invalid'><li value='invalid'>Default one</li><li>Default two</li></ol>",
+    "blocks":[{"kind":"list","text":"","items":[{"marker":"-2.","blocks":[{"kind":"text","text":"Negative two"}]},{"marker":"-1.","blocks":[{"kind":"text","text":"Negative one"}]}]},{"kind":"list","text":"","items":[{"marker":"1.","blocks":[{"kind":"text","text":"Default one"}]},{"marker":"2.","blocks":[{"kind":"text","text":"Default two"}]}]}],
+    "visible":["Negative two","Negative one","Default one","Default two"]
+  },
+  {
+    "name":"reversed ordered default start",
+    "html":"<ol reversed><li>Third</li><li>Second</li><li>First</li></ol>",
+    "blocks":[{"kind":"list","text":"","items":[{"marker":"3.","blocks":[{"kind":"text","text":"Third"}]},{"marker":"2.","blocks":[{"kind":"text","text":"Second"}]},{"marker":"1.","blocks":[{"kind":"text","text":"First"}]}]}],
+    "visible":["Third","Second","First"]
+  },
+  {
+    "name":"reversed explicit zero and item reset",
+    "html":"<ol reversed start='0'><li>Start zero</li><li>Below zero</li><li value='4'>Reset four</li><li>Then three</li></ol>",
+    "blocks":[{"kind":"list","text":"","items":[{"marker":"0.","blocks":[{"kind":"text","text":"Start zero"}]},{"marker":"-1.","blocks":[{"kind":"text","text":"Below zero"}]},{"marker":"4.","blocks":[{"kind":"text","text":"Reset four"}]},{"marker":"3.","blocks":[{"kind":"text","text":"Then three"}]}]}],
+    "visible":["Start zero","Below zero","Reset four","Then three"]
+  },
+  {
+    "name":"empty items remain and hidden content stays absent",
+    "html":"<ul><li></li><li hidden>Hidden item</li><li><span hidden>Hidden span</span><p>Visible</p></li><li style='display:none'>Hidden display</li></ul><ul hidden><li>Hidden list</li></ul>",
+    "blocks":[{"kind":"list","text":"","items":[{"marker":"•","blocks":[]},{"marker":"•","blocks":[{"kind":"text","text":"Visible"}]}]}],
+    "visible":["Visible"]
+  },
+  {
+    "name":"media code and table first items retain their blocks",
+    "html":"<ul><li><img src='https://example.invalid/list.png' alt='List image' width='320' height='180'><p>Image caption</p></li><li><pre><code>&lt;tag&gt; &amp;quot;</code></pre><p>After code</p></li><li><table><tr><td>Cell</td></tr></table></li></ul>",
+    "blocks":[{"kind":"list","text":"","items":[{"marker":"•","blocks":[{"kind":"image","text":"List image","url":"https://example.invalid/list.png","imageSize":{"width":320,"height":180}},{"kind":"text","text":"Image caption"}]},{"marker":"•","blocks":[{"kind":"code","text":"<tag> &quot;"},{"kind":"text","text":"After code"}]},{"marker":"•","blocks":[{"kind":"table","text":"","rows":[["Cell"]]}]}]}],
+    "visible":["List image","Image caption","<tag> &quot;","After code","Cell"],
+    "media":true
+  },
+  {
+    "name":"quoted lists and lists inside disclosures",
+    "html":"<blockquote><ul><li><p>Quoted item</p></li></ul></blockquote><details><summary>List details</summary><ol start='8'><li><p>Revealed item</p></li></ol></details>",
+    "blocks":[{"kind":"list","text":"","items":[{"marker":"•","blocks":[{"kind":"quote","text":"Quoted item"}]}]},{"kind":"disclosure","text":"List details","tabs":[{"label":"","blocks":[{"kind":"list","text":"","items":[{"marker":"8.","blocks":[{"kind":"text","text":"Revealed item"}]}]}]}]}],
+    "visible":["Quoted item","Revealed item"],
+    "disclosure":"List details"
+  },
+  {
+    "name":"tab lists retain decorated links and literal entities",
+    "html":"<div class='nsk-magic-tabs'><div class='nsk-magic-tab-title'>List tab</div><div class='nsk-magic-tab-body is-active'><ul><li><p><a href='https://example.invalid/?a=1&amp;b=2'><strong>&amp;quot; &amp; link</strong></a></p></li></ul></div></div>",
+    "blocks":[{"kind":"tabs","text":"","tabs":[{"label":"List tab","blocks":[{"kind":"list","text":"","items":[{"marker":"•","blocks":[{"kind":"text","text":"[**\\&quot; \\& link**](<https://example.invalid/?a=1&amp;b=2>)"}]}]}]}]}],
+    "visible":["&quot; & link"],
+    "link":"https://example.invalid/?a=1&b=2"
+  },
+  {
+    "name":"list signatures preserve text and nesting",
+    "html":"<p>Signature body</p>",
+    "signature":"<ul><li><p>Signature first</p><ol start='2'><li><strong>Nested signature</strong></li></ol><p>Signature continuation</p></li></ul>",
+    "blocks":[{"kind":"text","text":"Signature body"}],
+    "visible":["Signature body"],
+    "signatureMarkdown":"• Signature first\n  2. **Nested signature**\n  Signature continuation",
+    "signatureVisible":"• Signature first\n  2. Nested signature\n  Signature continuation"
+  },
+  {
+    "name":"terminal report survives list and tab nesting",
+    "html":"<div class='nsk-magic-tabs'><div class='nsk-magic-tab-title'>Report</div><div class='nsk-magic-tab-body is-active'><ul><li><pre><code class='language-ansi'>plain terminal</code></pre></li></ul></div></div>",
+    "blocks":[{"kind":"tabs","text":"","tabs":[{"label":"Report","blocks":[{"kind":"list","text":"","items":[{"marker":"•","blocks":[{"kind":"terminal","text":"plain terminal"}]}]}]}]}],
+    "visible":["plain terminal"],
+    "media":true
+  },
+  {
+    "name":"ordered hidden positions preserve numbering and resets",
+    "html":"<ol start='7'><li>Visible seven</li><li style='visibility:hidden' value='20'>Hidden twenty</li><li>Visible twenty one</li><li aria-hidden='true' value='25'>Hidden twenty five</li><li>Visible twenty six</li><li style='display:none' value='90'>Not in layout</li><li>Visible twenty seven</li></ol>",
+    "blocks":[{"kind":"list","text":"","items":[{"marker":"7.","blocks":[{"kind":"text","text":"Visible seven"}]},{"marker":"21.","blocks":[{"kind":"text","text":"Visible twenty one"}]},{"marker":"26.","blocks":[{"kind":"text","text":"Visible twenty six"}]},{"marker":"27.","blocks":[{"kind":"text","text":"Visible twenty seven"}]}]}],
+    "visible":["Visible seven","Visible twenty one","Visible twenty six","Visible twenty seven"]
+  },
+  {
+    "name":"reversed default counts hidden positions but excludes display none",
+    "html":"<ol reversed><li>First visible</li><li style='visibility:hidden'>Hidden middle</li><li style='display:none'>No counter position</li><li>Last visible</li></ol>",
+    "blocks":[{"kind":"list","text":"","items":[{"marker":"3.","blocks":[{"kind":"text","text":"First visible"}]},{"marker":"1.","blocks":[{"kind":"text","text":"Last visible"}]}]}],
+    "visible":["First visible","Last visible"]
+  }
+]

@@ -47,8 +47,8 @@ enum ForumDirectory {
         return references(try JSONDecoder().decode([Member].self, from: Data(json.utf8)))
     }
 
-    static func members(_ route: Route) async throws -> [ForumUserReference] {
-        let (payload, _) = try await request(route)
+    static func members(_ route: Route, dataStore: WKWebsiteDataStore? = nil) async throws -> [ForumUserReference] {
+        let (payload, _) = try await request(route, dataStore: dataStore ?? .default())
         return references(payload.memberList ?? [])
     }
 
@@ -61,8 +61,8 @@ enum ForumDirectory {
         }
     }
 
-    static func activity(_ route: Route, member: Int, page: Int) async throws -> (items: [ForumActivity], floorsPerPage: Int, site: ForumWebPage) {
-        let (payload, site) = try await request(route, member: member, page: page)
+    static func activity(_ route: Route, member: Int, page: Int, dataStore: WKWebsiteDataStore? = nil) async throws -> (items: [ForumActivity], floorsPerPage: Int, site: ForumWebPage) {
+        let (payload, site) = try await request(route, member: member, page: page, dataStore: dataStore ?? .default())
         let count = route == .comments ? (try? await site.identity())?.floorsPerPage ?? 10 : 10
         return ((route == .comments ? payload.comments : payload.discussions) ?? [], count, site)
     }
@@ -75,8 +75,8 @@ enum ForumDirectory {
         return timestamps.mapValues { Date(timeIntervalSince1970: $0 / 1_000) }
     }
 
-    private static func request(_ route: Route, member: Int = 0, page: Int = 1) async throws -> (Payload, ForumWebPage) {
-        let site = ForumWebPage(dataStore: .default())
+    private static func request(_ route: Route, member: Int = 0, page: Int = 1, dataStore: WKWebsiteDataStore) async throws -> (Payload, ForumWebPage) {
+        let site = ForumWebPage(dataStore: dataStore)
         try await site.read(Forum.home)
         if site.challenged { throw ForumPageError.verification }
         let value = try await site.webView.callAsyncJavaScript(read,

@@ -10,17 +10,23 @@ struct ProfileIntroductionEditor: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            HStack(spacing: 10) {
-                Text("编辑个人资料").font(.title3.weight(.semibold)).accessibilityAddTraits(.isHeader)
-                Spacer()
-                if state.original != nil {
-                    Picker("资料编辑模式", selection: $state.preview) {
-                        Text("编辑").tag(false)
-                        Text("预览").tag(true)
+            Group {
+                HStack(spacing: 10) {
+                    Text("编辑个人资料").font(.title3.weight(.semibold)).accessibilityAddTraits(.isHeader)
+                    Spacer()
+                    if state.original != nil {
+                        DeskGlassPicker(values: [false, true], selection: $state.preview,
+                                        tint: palette.accent, solid: palette.selection, compact: true) { preview, _ in
+                            Text(preview ? "预览" : "编辑").font(.system(size: 12, weight: .medium))
+                        }
+                        .fixedSize()
+                        .padding(4)
+                        .accessibilityLabel("资料编辑模式")
                     }
-                    .pickerStyle(.segmented).labelsHidden().fixedSize()
+                    Button("取消", action: cancel).buttonStyle(.borderless).disabled(state.saving)
                 }
-                Button("取消", action: cancel).disabled(state.saving)
+                .padding(12)
+                .deskGlass(in: RoundedRectangle(cornerRadius: 13), solid: palette.list)
             }
 
             if state.loading {
@@ -31,20 +37,23 @@ struct ProfileIntroductionEditor: View {
             }
             if let issue = state.issue {
                 Text(issue.message ?? description(issue.kind)).font(.callout).foregroundStyle(.secondary)
-                if issue.kind == .verification { Button("打开验证窗口") { session.verify(Forum.home.appendingPathComponent("setting")) } }
-                if state.original == nil { Button("重试读取") { state.retry += 1 } }
+                if issue.kind == .verification {
+                    Button("打开验证窗口") { session.verify(Forum.home.appendingPathComponent("setting")) }.deskGlassButtonStyle()
+                }
+                if state.original == nil { Button("重试读取") { state.retry += 1 }.deskGlassButtonStyle() }
             }
             if state.original != nil {
                 HStack(spacing: 8) {
                     Spacer()
                     if state.saving { ProgressView().controlSize(.small).accessibilityLabel("正在保存") }
                     Button("保存资料", action: save)
-                        .buttonStyle(.borderedProminent).tint(palette.publish)
+                        .deskGlassButtonStyle(prominent: true).tint(palette.publish)
                         .disabled(state.saving || state.draft == state.original)
                 }
             }
         }
-        .padding(16).background(palette.surface, in: RoundedRectangle(cornerRadius: 10))
+        .padding(20).background(palette.list, in: RoundedRectangle(cornerRadius: 18))
+        .overlay { RoundedRectangle(cornerRadius: 18).strokeBorder(palette.line).allowsHitTesting(false) }
         .task(id: state.retry) {
             state.loading = true
             state.issue = nil

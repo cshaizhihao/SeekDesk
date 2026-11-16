@@ -1,15 +1,130 @@
 import AppKit
 import ImageIO
+import LocalAuthentication
 import Security
 import SwiftUI
 import UniformTypeIdentifiers
 
+final class NodeImageWorker: @unchecked Sendable {
+    static let shared = NodeImageWorker(label: "com.seekdesk.nodeimage-key")
+    private let queue: DispatchQueue
+
+    init(label: String) {
+        queue = DispatchQueue(label: label, qos: .userInitiated)
+    }
+
+    func run<Value: Sendable>(
+        // This observer lets injected checks establish submission order without
+        // sleeping or accessing the real Keychain backend.
+        onQueued: (@Sendable () -> Void)? = nil,
+        _ operation: @escaping @Sendable () throws -> Value
+    ) async throws -> Value {
+        try Task.checkCancellation()
+        let pending = Pending<Value>()
+        return try await withTaskCancellationHandler {
+            let result = await withCheckedContinuation { (continuation: CheckedContinuation<Result<Value, Error>, Never>) in
+                guard pending.install(continuation) else { return }
+                queue.async {
+                    guard pending.start() else { return }
+                    pending.complete(Result(catching: operation))
+                }
+                onQueued?()
+            }
+            // Cancellation must win over both a successful result and a backend
+            // error, but only after an already-started operation really finishes.
+            try Task.checkCancellation()
+            return try result.get()
+        } onCancel: {
+            pending.cancel()
+        }
+    }
+
+    private final class Pending<Value: Sendable>: @unchecked Sendable {
+        private enum Phase { case waiting, started, cancelled, completed }
+        private let lock = NSLock()
+        private var phase = Phase.waiting
+        private var continuation: CheckedContinuation<Result<Value, Error>, Never>?
+
+        func install(_ continuation: CheckedContinuation<Result<Value, Error>, Never>) -> Bool {
+            lock.lock()
+            if phase == .cancelled {
+                lock.unlock()
+                continuation.resume(returning: .failure(CancellationError()))
+                return false
+            }
+            self.continuation = continuation
+            lock.unlock()
+            return true
+        }
+
+        func start() -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            guard phase == .waiting else { return false }
+            phase = .started
+            return true
+        }
+
+        func complete(_ result: Result<Value, Error>) {
+            lock.lock()
+            precondition(phase == .started)
+            phase = .completed
+            let continuation = self.continuation
+            self.continuation = nil
+            lock.unlock()
+            continuation?.resume(returning: result)
+        }
+
+        func cancel() {
+            lock.lock()
+            guard phase == .waiting else { lock.unlock(); return }
+            phase = .cancelled
+            let continuation = self.continuation
+            self.continuation = nil
+            lock.unlock()
+            continuation?.resume(returning: .failure(CancellationError()))
+        }
+    }
+}
+
 enum NodeImageKey {
+    private static let service = Bundle.main.bundleIdentifier == "com.seekdesk.flutter-preview"
+        ? "com.seekdesk.flutter-preview.nodeimage" : "com.seekdesk.client.nodeimage"
     private static let query = [
         kSecClass as String: kSecClassGenericPassword,
-        kSecAttrService as String: "com.seekdesk.client.nodeimage",
+        kSecAttrService as String: service,
         kSecAttrAccount as String: "api-key"
     ] as [String: Any]
+    private static let statusWorker = NodeImageWorker(label: "com.seekdesk.nodeimage-status")
+
+    static func configured(
+        matching: @escaping @Sendable ([String: Any]) -> OSStatus = { SecItemCopyMatching($0 as CFDictionary, nil) }
+    ) async throws -> Bool {
+        let status = try await statusWorker.run {
+            var options = query
+            options[kSecMatchLimit as String] = kSecMatchLimitOne
+            let authentication = LAContext()
+            authentication.interactionNotAllowed = true
+            options[kSecUseAuthenticationContext as String] = authentication
+            return matching(options)
+        }
+        switch status {
+        case errSecSuccess: return true
+        case errSecItemNotFound: return false
+        default: throw NodeImageError.keychain
+        }
+    }
+
+    static func readAsync() async throws -> String? {
+        try await NodeImageWorker.shared.run { try read() }
+    }
+
+    static func saveAsync(_ key: String) async throws {
+        try await NodeImageWorker.shared.run { try save(key) }
+    }
+
+    static func removeAsync() async throws {
+        try await NodeImageWorker.shared.run { try remove() }
+    }
 
     static func read() throws -> String? {
         var options = query
@@ -61,7 +176,7 @@ struct MarkdownImageScale: Hashable, Codable, Sendable {
     static let maximumWidth = 1080
     static let maximumEdge = 3600
     let ratio: Double
-    private let previewWidth: Int
+    let previewWidth: Int
 
     init(ratio: Double, previewWidth: Double) {
         self.ratio = min(1, max(0.1, ratio))
@@ -78,7 +193,7 @@ enum NodeImageUpload {
     static let website = URL(string: "https://www.nodeimage.com/")!
     static let sizeLimit = 100 * 1024 * 1024
 
-    struct Picture {
+    struct Picture: Sendable {
         let data: Data
         let name: String
         let mime: String
@@ -129,7 +244,7 @@ enum NodeImageUpload {
         config.httpCookieStorage = nil
         config.urlCredentialStorage = nil
         config.timeoutIntervalForResource = 90
-        let session = URLSession(configuration: config, delegate: NoRedirect(), delegateQueue: nil)
+        let session = DeskProxyNetwork.shared.makeSession(configuration: config, delegate: NoRedirect(), delegateQueue: nil)
         defer { session.finishTasksAndInvalidate() }
         let (request, body) = multipart(picture, key: key, boundary: "SeekDesk-\(UUID().uuidString)")
         let (data, response) = try await session.upload(for: request, from: body)
@@ -146,12 +261,12 @@ enum NodeImageUpload {
         config.urlCredentialStorage = nil
         config.urlCache = nil
         config.timeoutIntervalForResource = 30
-        let session = URLSession(configuration: config)
+        let session = DeskProxyNetwork.shared.makeSession(configuration: config)
         defer { session.finishTasksAndInvalidate() }
         var request = URLRequest(url: url)
         request.setValue(Forum.home.absoluteString, forHTTPHeaderField: "Referer")
         request.setValue("image/*", forHTTPHeaderField: "Accept")
-        let (file, response) = try await session.download(for: request)
+        let (file, response) = try await session.download(for: request, maximumBytes: sizeLimit)
         defer { try? FileManager.default.removeItem(at: file) }
         try Task.checkCancellation()
         let size = try file.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
@@ -207,12 +322,15 @@ struct NodeImageSettingsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 11) {
             DeskLabel("NodeImage 图床", systemImage: "photo.badge.arrow.down").font(.headline)
+                .frame(maxWidth: .infinity, alignment: .leading).padding(12)
+                .deskGlass(in: RoundedRectangle(cornerRadius: 13), solid: Color(nsColor: .windowBackgroundColor))
             Text("在 NodeImage 网站授权后，从「API」复制自己的密钥。密钥保存在此 Mac 的钥匙串。")
                 .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             Link("打开 NodeImage 网站", destination: NodeImageUpload.website)
             SecureField("粘贴 API 密钥", text: $state.key).textFieldStyle(.roundedBorder)
+                .controlSize(.large).accessibilityLabel("NodeImage API 密钥")
             if let message = state.message { Text(message).font(.caption).foregroundStyle(.secondary) }
-            HStack {
+            DeskGlassGroup { HStack {
                 Button("移除已保存密钥") {
                     do { try NodeImageKey.remove(); state.key = ""; state.message = "密钥已移除。" }
                     catch { state.message = error.localizedDescription }
@@ -226,10 +344,13 @@ struct NodeImageSettingsView: View {
                     catch { state.message = error.localizedDescription }
                 }
                 .keyboardShortcut(.defaultAction)
+                .deskGlassButtonStyle(prominent: true)
                 .disabled(state.key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
+            .deskGlassButtonStyle()
+            }
         }
-        .padding(20).frame(width: 440)
+        .padding(20).frame(width: 460).background(Color(nsColor: .windowBackgroundColor))
     }
 
     @MainActor private final class State: ObservableObject {

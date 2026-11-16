@@ -12,16 +12,19 @@ struct TopicListRowLabel: View {
     var readingRank: Int? = nil
     var featured = false
     var blocked = false
+    @AppStorage(DeskReadingDensity.preference) private var density = DeskReadingDensity.comfortable
 
     var body: some View {
         let size = CGFloat(titleSize)
         let metadataSize = max(11, (size * 0.78).rounded())
-        HStack(alignment: .top, spacing: 9) {
-            ForumAvatar(url: avatarURL, size: max(29, size + 15), palette: palette).padding(.top, 1)
-            VStack(alignment: .leading, spacing: max(5, size * 0.35)) {
+        HStack(alignment: .top, spacing: 11) {
+            ForumAvatar(url: avatarURL, size: max(30, size + 14), palette: palette).padding(.top, 2)
+            VStack(alignment: .leading, spacing: max(7, size * 0.4).rounded()) {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text(title)
-                        .font(.system(size: size, weight: .semibold))
+                        .font(.system(size: size, weight: .regular))
+                        .foregroundStyle(.primary)
+                        .lineSpacing(3)
                         .lineLimit(3)
                         .fixedSize(horizontal: false, vertical: true)
                     if featured || readingRank != nil {
@@ -47,8 +50,8 @@ struct TopicListRowLabel: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 11)
-        .padding(.vertical, max(9, size * 0.55))
+        .padding(.horizontal, 13)
+        .padding(.vertical, max(density.rowPadding, size * 0.48).rounded())
         .frame(minHeight: 56)
     }
 }

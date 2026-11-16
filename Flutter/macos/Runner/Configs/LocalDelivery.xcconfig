@@ -1,0 +1,4 @@
+// Only the explicit local-delivery script loads this through XCODE_XCCONFIG_FILE.
+// Custom keys avoid renaming Flutter/App frameworks or Swift package targets.
+SEEKDESK_PRODUCT_NAME = SeekDesk
+SEEKDESK_BUNDLE_IDENTIFIER = com.seekdesk.client

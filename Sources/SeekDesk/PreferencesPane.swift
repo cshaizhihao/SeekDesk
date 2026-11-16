@@ -32,53 +32,83 @@ struct PreferencesPane: View {
     @AppStorage(ForumReportKind.tq.preference) private var tqReportScale = ForumReportKind.tq.standard
     @AppStorage("workspace.topicColumnWidth") private var listWidth = 340.0
     @AppStorage("workspace.sidebarWidth") private var sidebarWidth = DeskSidebarSizing.standard
+    @AppStorage(DeskReadingDensity.preference) private var density = DeskReadingDensity.comfortable
     @StateObject private var selection = Selection()
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        HStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: 7) {
-                Button(action: returnToForum) { DeskLabel(returnTitle, systemImage: "chevron.left") }
-                    .buttonStyle(.bordered).padding(.bottom, 6)
-                Text("设置").font(.system(size: 22, weight: .bold)).padding(.bottom, 10)
-                ForEach(Category.allCases) { category in
-                    Button { selection.category = category } label: {
-                        DeskLabel(category.title, systemImage: category.icon)
-                            .font(.system(size: 13, weight: selection.category == category ? .semibold : .medium))
-                            .padding(.horizontal, 9).frame(maxWidth: .infinity, alignment: .leading).frame(height: 32)
-                            .background(selection.category == category ? palette.selection : .clear, in: RoundedRectangle(cornerRadius: 7))
-                            .animation(reduceMotion ? nil : DeskMotion.selection, value: selection.category == category)
+        GeometryReader { geometry in
+            let compact = geometry.size.width < 760
+            let layout = compact ? AnyLayout(VStackLayout(spacing: 0)) : AnyLayout(HStackLayout(spacing: 0))
+            layout {
+                navigation(compact: compact)
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 18) {
+                            Text(selection.category.title).font(.system(size: 24, weight: .semibold)).accessibilityAddTraits(.isHeader)
+                            panel(compact: compact)
+                        }
+                        // Keep the glass surface mounted when changing categories.
+                        // Re-identifying it replayed its fade-in and flashed the whole panel.
+                        .frame(maxWidth: 690, alignment: .leading).padding(compact ? 16 : 24)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .id("preferences-content-top")
+                        .transaction(value: selection.category) { transaction in
+                            transaction.animation = nil
+                            transaction.disablesAnimations = true
+                        }
                     }
-                    .buttonStyle(DeskButtonStyle())
-                    .accessibilityAddTraits(selection.category == category ? .isSelected : [])
+                    .onChange(of: selection.category) { _, _ in
+                        var transaction = Transaction(animation: nil)
+                        transaction.disablesAnimations = true
+                        withTransaction(transaction) {
+                            proxy.scrollTo("preferences-content-top", anchor: .top)
+                        }
+                    }
                 }
-                Spacer()
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            .padding(15).frame(width: 155).background(palette.list)
-            Rectangle().fill(palette.line).frame(width: 1)
-            ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    Text(selection.category.title).font(.system(size: 24, weight: .semibold)).accessibilityAddTraits(.isHeader)
-                    panel
-                }
-                .id(selection.category)
-                .modifier(DeskArrival())
-                .frame(maxWidth: 690, alignment: .leading).padding(24)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .background(palette.reader)
+        .background(palette.readerWash)
     }
 
-    @ViewBuilder private var panel: some View {
+    private func navigation(compact: Bool) -> some View {
+        Group {
+            VStack(alignment: .leading, spacing: compact ? 5 : 7) {
+                HStack {
+                    Button(action: returnToForum) { DeskLabel(returnTitle, systemImage: "chevron.left") }
+                        .buttonStyle(DeskButtonStyle())
+                    if compact {
+                        Spacer()
+                        Text("设置").font(.system(size: 18, weight: .semibold))
+                    }
+                }
+                if !compact { Text("设置").font(.system(size: 22, weight: .bold)).padding(.vertical, 8) }
+                DeskGlassPicker(values: Category.allCases, selection: $selection.category,
+                                tint: palette.accent, solid: palette.selection, vertical: !compact,
+                                compact: compact) { category, _ in
+                    DeskLabel(category.title, systemImage: category.icon)
+                        .font(.system(size: compact ? 12 : 13, weight: .semibold))
+                }
+                if !compact { Spacer() }
+            }
+            .padding(compact ? 12 : 15).frame(width: compact ? nil : 155)
+            .frame(maxWidth: compact ? .infinity : nil, alignment: .leading)
+            .background(palette.chrome.opacity(0.45), in: RoundedRectangle(cornerRadius: 18))
+        }
+        .padding(10)
+    }
+
+    @ViewBuilder private func panel(compact: Bool) -> some View {
         VStack(alignment: .leading, spacing: 16) {
             switch selection.category {
             case .general:
-                Picker("发送帖子回复", selection: $replySendKey) {
-                    ForEach(ReplySendKey.allCases) { Text($0.title).tag($0) }
+                Text("发送帖子回复").font(.callout)
+                DeskGlassPicker(values: ReplySendKey.allCases, selection: $replySendKey,
+                                tint: palette.accent, solid: palette.selection, compact: true) { key, _ in
+                    Text(key.title).font(.system(size: 12, weight: .semibold))
                 }
-                .pickerStyle(.segmented)
+                .accessibilityLabel("发送帖子回复")
                 Text(replySendKey == .returnKey ? "按 Shift + Return 换行。" : "按 Return 换行。")
                     .font(.caption).foregroundStyle(.secondary)
                 Toggle("自动刷新首页", isOn: $autoRefresh)
@@ -87,13 +117,22 @@ struct PreferencesPane: View {
                     Toggle("自动检查应用更新", isOn: Binding(
                         get: { updater.automaticallyChecksForUpdates },
                         set: { updater.automaticallyChecksForUpdates = $0 }))
-                    Button("检查更新…", action: updates.check).disabled(!updates.canCheck)
+                    Button("检查更新…", action: updates.check).buttonStyle(.bordered).disabled(!updates.canCheck)
                 } else {
                     LabeledContent("应用更新") {
                         Link("前往 GitHub 检查更新", destination: AppInformation.releases)
                     }
                 }
             case .reading:
+                Text("阅读布局").font(.callout)
+                DeskGlassPicker(values: DeskReadingDensity.allCases, selection: $density,
+                                tint: palette.accent, solid: palette.selection, compact: true) { density, _ in
+                    Text(density.title).font(.system(size: 12, weight: .semibold))
+                }
+                .accessibilityLabel("阅读布局")
+                Text("舒适布局增加列表与楼层留白，并控制正文行宽；字号仍可独立调整。")
+                    .font(.caption).foregroundStyle(.secondary)
+                Divider()
                 textSizeControl("帖子列表字号", size: $listTextSize, range: DeskTextSize.listRange,
                                 standard: DeskTextSize.listDefault) {
                     TopicListRowLabel(title: "分享一次晚高峰的三网线路实测", author: "示例用户", time: "刚刚",
@@ -127,34 +166,30 @@ struct PreferencesPane: View {
                 Toggle("滚动到底部时自动加载更早的帖子", isOn: $autoLoad)
                 Text("关闭时，可以用列表底部的按钮手动加载。")
                     .font(.caption).foregroundStyle(.secondary)
-                Button("恢复默认帖子栏宽度") { listWidth = 340 }
+                Button("恢复默认帖子栏宽度") { listWidth = 340 }.buttonStyle(.bordered)
             case .appearance:
-                Picker("外观模式", selection: $appearance) {
-                    Text("跟随系统").tag("system")
-                    Text("白天").tag("light")
-                    Text("黑夜").tag("dark")
+                Text("外观模式").font(.callout)
+                DeskGlassPicker(values: ["system", "light", "dark"], selection: $appearance,
+                                tint: palette.accent, solid: palette.selection, compact: true) { mode, _ in
+                    Text(mode == "system" ? "跟随系统" : mode == "light" ? "白天" : "黑夜")
+                        .font(.system(size: 12, weight: .semibold))
                 }
-                .pickerStyle(.segmented)
+                .accessibilityLabel("外观模式")
                 Divider()
                 logoPicker
                 Divider()
                 Toggle("阅读区顶部渐变", isOn: $readerGradient)
                     .help("帖子顶部使用与外观模式相配的淡渐变。")
-                HStack(spacing: 10) {
-                    Text("侧栏宽度")
-                    Slider(value: $sidebarWidth, in: Double(DeskSidebarSizing.range.lowerBound)...Double(DeskSidebarSizing.range.upperBound), step: 4)
-                        .accessibilityLabel("侧栏宽度")
-                    Text("\(Int(sidebarWidth)) 点").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-                    Button("恢复默认") { sidebarWidth = DeskSidebarSizing.standard }
-                }
+                sizeSlider("侧栏宽度", size: $sidebarWidth,
+                           range: Double(DeskSidebarSizing.range.lowerBound)...Double(DeskSidebarSizing.range.upperBound),
+                           standard: DeskSidebarSizing.standard, step: 4)
             case .about:
                 about
             }
         }
         .toggleStyle(.switch)
-        .padding(16).frame(maxWidth: .infinity, alignment: .leading)
-        .background(palette.list, in: RoundedRectangle(cornerRadius: 9))
-        .overlay { RoundedRectangle(cornerRadius: 9).strokeBorder(palette.line).allowsHitTesting(false) }
+        .padding(compact ? 16 : 22).frame(maxWidth: .infinity, alignment: .leading)
+        .deskGlass(in: RoundedRectangle(cornerRadius: 18), solid: palette.list)
     }
 
     private var about: some View {
@@ -275,19 +310,31 @@ struct PreferencesPane: View {
                             standard: Double, step: Double = 1, unit: String = " 点") -> some View {
         let value = "\(Int(size.wrappedValue))\(unit)"
         return VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 10) {
-                Text(title).font(.system(size: 13, weight: .semibold))
-                Spacer()
-                Text(value).font(.callout.monospacedDigit()).foregroundStyle(.secondary)
-                Button("恢复默认") { size.wrappedValue = standard }
-                    .buttonStyle(.borderless)
-                    .foregroundStyle(palette.accent)
-                    .accessibilityLabel("恢复默认\(title)")
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 10) {
+                    Text(title).font(.system(size: 13, weight: .semibold)).fixedSize()
+                    Spacer(minLength: 8)
+                    sizeValue(value, title: title, size: size, standard: standard)
+                }
+                VStack(alignment: .leading, spacing: 7) {
+                    Text(title).font(.system(size: 13, weight: .semibold))
+                    HStack {
+                        sizeValue(value, title: title, size: size, standard: standard)
+                        Spacer(minLength: 0)
+                    }
+                }
             }
             Slider(value: size, in: range, step: step)
                 .accessibilityLabel(title)
                 .accessibilityValue(value)
         }
+    }
+
+    @ViewBuilder private func sizeValue(_ value: String, title: String, size: Binding<Double>, standard: Double) -> some View {
+        Text(value).font(.callout.monospacedDigit()).foregroundStyle(.secondary).fixedSize()
+        Button("恢复默认") { size.wrappedValue = standard }
+            .buttonStyle(.borderless).foregroundStyle(palette.accent)
+            .accessibilityLabel("恢复默认\(title)").fixedSize()
     }
 
     private func sizePreview<Preview: View>(@ViewBuilder _ preview: () -> Preview) -> some View {

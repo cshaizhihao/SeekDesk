@@ -86,3 +86,64 @@ try checkRemainingValue()
 
 try checkDiscussion()
 checkReportSizing()
+try checkProxyNodes()
+
+// Closed tabs retain their exact URL and order, with migration from the old session format.
+var closingSession = ReadingSession()
+for id in 1...25 {
+    let url = Forum.home.appendingPathComponent("post-\(id)-3")
+    closingSession.open(url, title: "Topic \(id)", background: false)
+    closingSession.close(String(id))
+}
+precondition(closingSession.closedTopics.count == 20)
+precondition(closingSession.closedTopics.first?.id == "6")
+var closedRestored = try JSONDecoder().decode(ReadingSession.self, from: JSONEncoder().encode(closingSession))
+precondition(closedRestored.reopen() && closedRestored.selectedTopic?.id == "25")
+precondition(closedRestored.selectedTopic?.url.lastPathComponent == "post-25-3")
+precondition(!closedRestored.reopen("missing") && closedRestored.topics.count == 1)
+closedRestored.open(Forum.home.appendingPathComponent("post-24-1"), title: "24", background: true)
+precondition(!closedRestored.closedTopics.contains { $0.id == "24" })
+closedRestored.closeAll()
+precondition(closedRestored.topics.isEmpty && closedRestored.reopen())
+precondition(closedRestored.selectedTopic?.id == "25")
+closedRestored.clearPrivilegedMetadata()
+precondition(closedRestored.topics.allSatisfy { $0.title.isEmpty && $0.preview == nil && $0.draft.isEmpty })
+precondition(closedRestored.closedTopics.allSatisfy { $0.topic.title.isEmpty && $0.topic.preview == nil })
+var order = ReadingSession()
+for id in 1...3 { order.open(Forum.home.appendingPathComponent("post-\(id)-1"), title: "\(id)", background: false) }
+order.close("2")
+precondition(order.reopen() && order.topics.map(\.id) == ["1", "2", "3"])
+precondition(migrated.closedTopics.isEmpty)
+for selected in 1...5 {
+    var batch = ReadingSession()
+    for id in 1...5 { batch.open(Forum.home.appendingPathComponent("post-\(id)-2"), title: "\(id)", background: false) }
+    batch.select(String(selected))
+    batch.closeAll()
+    precondition(batch.reopen() && batch.selection == String(selected))
+    while batch.reopen() {}
+    precondition(batch.topics.map(\.id) == ["1", "2", "3", "4", "5"])
+}
+
+@MainActor func checkReadingProgress() {
+let readingSuite = "SeekDesk.positions.\(UUID().uuidString)"
+let readingDefaults = UserDefaults(suiteName: readingSuite)!
+let progress = ReadingProgress(defaults: readingDefaults)
+progress.remember("floor-27", at: floor)
+progress.flush()
+let reopenedProgress = ReadingProgress(defaults: readingDefaults)
+precondition(reopenedProgress.anchor(at: floor) == "floor-27")
+reopenedProgress.activate(7)
+precondition(reopenedProgress.anchor(at: floor) == nil)
+reopenedProgress.remember("floor-9", at: floor)
+reopenedProgress.activate(8)
+precondition(reopenedProgress.anchor(at: floor) == nil)
+reopenedProgress.activate(7)
+precondition(reopenedProgress.anchor(at: floor) == "floor-9")
+reopenedProgress.remember("untrusted anchor", at: floor)
+reopenedProgress.remember("floor-4", at: outsider)
+precondition(reopenedProgress.anchor(at: floor) == "floor-9")
+reopenedProgress.flush()
+readingDefaults.removePersistentDomain(forName: readingSuite)
+}
+checkReadingProgress()
+print("Passed bounded closed-tab history, exact-page restore, original order, restart migration and account-isolated reading positions.")

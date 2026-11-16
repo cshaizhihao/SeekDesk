@@ -1,0 +1,10 @@
+# Flutter-related
+**/Flutter/ephemeral/
+**/Pods/
+
+# Xcode-related
+**/dgph
+**/xcuserdata/
+
+# Prepared from the pinned official Sparkle release by scripts/prepare-native.sh.
+/Frameworks/Sparkle.framework/

@@ -18,6 +18,26 @@ final class ForumInlineEdit: ObservableObject {
         let title: String?
     }
 
+    struct Requests {
+        var read: @MainActor (ForumWebPage, Target) async throws -> String? = { page, target in
+            try await page.webView.callAsyncJavaScript(ForumInlineEdit.read,
+                arguments: target.arguments, in: nil, contentWorld: .page) as? String
+        }
+        var prepare: @MainActor (DraftImageSizing, String, @escaping DraftImageSizing.Authorization) async throws -> String = { sizing, markdown, authorized in
+            try await sizing.prepare(markdown, authorized: authorized)
+        }
+        var write: @MainActor (ForumWebPage, Target, String, String) async throws -> String? = { page, target, title, content in
+            var arguments: [String: Any] = target.arguments
+            arguments["title"] = title
+            arguments["content"] = content
+            return try await page.webView.callAsyncJavaScript(ForumInlineEdit.write,
+                arguments: arguments, in: nil, contentWorld: .page) as? String
+        }
+    }
+    private let requests: Requests
+
+    init(requests: Requests = Requests()) { self.requests = requests }
+
     @Published private(set) var target: Target?
     @Published private var original: Original?
     @Published private(set) var loading = false
@@ -46,6 +66,7 @@ final class ForumInlineEdit: ObservableObject {
         target = nil
         original = nil
         loading = false
+        saving = false
         message = nil
         needsVerification = false
         title = ""
@@ -57,11 +78,10 @@ final class ForumInlineEdit: ObservableObject {
         guard let target, !loading, !ready else { return }
         loading = true
         message = nil
-        let result = try? await page.webView.callAsyncJavaScript(Self.read,
-            arguments: target.arguments, in: nil, contentWorld: .page)
+        let result = try? await requests.read(page, target)
         guard self.target == target else { return }
         loading = false
-        guard let json = result as? String,
+        guard let json = result,
               let original = try? JSONDecoder().decode(Original.self, from: Data(json.utf8)) else {
             message = "暂时无法读取这一楼的原始 Markdown，请刷新帖子后重试。"
             return
@@ -71,28 +91,30 @@ final class ForumInlineEdit: ObservableObject {
         self.original = original
     }
 
-    func save(on page: ForumWebPage, authorized: () -> Bool) async -> Bool {
-        guard let target, canSave else { return false }
+    func save(on page: ForumWebPage, authorized: @escaping () -> Bool) async -> Bool {
+        guard !Task.isCancelled, authorized(), let target, canSave else { return false }
+        let originalContent = content
+        let originalTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         saving = true
         message = nil
         defer { if self.target == target { saving = false } }
+        let isCurrent: DraftImageSizing.Authorization = {
+            authorized() && self.target == target && self.saving
+        }
         let prepared: String
-        do { prepared = try await sizing.prepare(content) }
+        do { prepared = try await requests.prepare(sizing, originalContent, isCurrent) }
+        catch is CancellationError { return false }
         catch {
-            guard authorized(), self.target == target else { return false }
+            guard !Task.isCancelled, isCurrent() else { return false }
             message = (error as? NodeImageError ?? .connection).localizedDescription + " 修改已保留。"
             return false
         }
-        guard authorized(), self.target == target else {
+        guard !Task.isCancelled, isCurrent() else {
             return false
         }
-        var arguments: [String: Any] = target.arguments
-        arguments["title"] = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        arguments["content"] = prepared
-        let value = try? await page.webView.callAsyncJavaScript(Self.write,
-            arguments: arguments, in: nil, contentWorld: .page)
+        let value = try? await requests.write(page, target, originalTitle, prepared)
         guard authorized(), self.target == target else { return false }
-        guard let raw = value as? String, let response = try? JSONDecoder().decode(Response.self, from: Data(raw.utf8)) else {
+        guard let raw = value, let response = try? JSONDecoder().decode(Response.self, from: Data(raw.utf8)) else {
             message = "未收到保存结果。请刷新确认修改是否已生效，再决定是否重试。"
             return false
         }

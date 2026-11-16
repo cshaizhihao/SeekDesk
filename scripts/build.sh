@@ -50,16 +50,27 @@ else
 fi
 framework="$sparkle/macos-arm64_x86_64/Sparkle.framework"
 [[ -d "$framework" ]] || { echo "Sparkle framework not found." >&2; exit 1; }
+proxy_core="Distribution/ProxyCore/xray"
+[[ -x "$proxy_core" && -f Distribution/ProxyCore/Xray-LICENSE.txt ]] || {
+    echo "The bundled Xray core or license is missing." >&2; exit 1;
+}
+[[ "$(shasum -a 256 "$proxy_core" | awk '{print $1}')" == 1b2d5ebe3a4c332203db24b81a052c6d6688a7f80705090f031b7416013ee1b2 ]] || {
+    echo "The bundled Xray core does not match the pinned release." >&2; exit 1;
+}
 
 stage="$(mktemp -d "$output/.build.XXXXXX")"
 trap 'rm -rf "$stage"' EXIT
 staged_app="$stage/SeekDesk.app"
 plist="$staged_app/Contents/Info.plist"
-mkdir -p "$staged_app/Contents/"{MacOS,Frameworks,Resources}
+mkdir -p "$staged_app/Contents/"{MacOS,Frameworks,Resources,Helpers}
 cp "$bin_dir/SeekDesk" "$staged_app/Contents/MacOS/SeekDesk"
+cp "$proxy_core" "$staged_app/Contents/Helpers/xray"
+chmod 755 "$staged_app/Contents/Helpers/xray"
 ditto "$framework" "$staged_app/Contents/Frameworks/Sparkle.framework"
 cp Distribution/Info.plist "$plist"
-cp LICENSE Distribution/Sparkle-LICENSE.txt "$staged_app/Contents/Resources/"
+cp LICENSE Distribution/Sparkle-LICENSE.txt Distribution/ProxyCore/Xray-LICENSE.txt Distribution/ProxyCore/README.txt "$staged_app/Contents/Resources/"
+cp Vendor/Yams/LICENSE "$staged_app/Contents/Resources/Yams-LICENSE.txt"
+cp Vendor/Yams/libyaml-LICENSE.txt "$staged_app/Contents/Resources/libyaml-LICENSE.txt"
 ditto Distribution/Icons "$staged_app/Contents/Resources/Icons"
 ditto Distribution/DockIcons "$staged_app/Contents/Resources/DockIcons"
 partner_resources="$staged_app/Contents/Resources/Partners"
@@ -107,8 +118,10 @@ if [[ "$mode" == release ]]; then
     sign "$resources/XPCServices/Downloader.xpc"
     sign "$resources/XPCServices/Installer.xpc"
     sign "$embedded"
+    sign "$staged_app/Contents/Helpers/xray"
     sign "$staged_app"
 else
+    codesign --force --sign - "$staged_app/Contents/Helpers/xray"
     codesign --force --deep --sign - "$staged_app"
 fi
 codesign --verify --deep --strict "$staged_app"

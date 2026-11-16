@@ -1,13 +1,13 @@
 import Foundation
 
-struct ForumIdentity: Decodable {
+struct ForumIdentity: Codable {
     let signedIn: Bool
     let id: Int?
     let name: String?
     let floorsPerPage: Int?
 }
 
-struct ForumProfile: Decodable, Equatable {
+struct ForumProfile: Codable, Equatable {
     let id: Int
     let name: String
     let rank: Int?
@@ -20,14 +20,14 @@ struct ForumProfile: Decodable, Equatable {
     var coin: Int?
 }
 
-struct ForumIntroduction: Decodable, Equatable {
+struct ForumIntroduction: Codable, Equatable {
     let bio: String
     var signature: String
     var readme: String
 }
 
-struct ForumIntroductionResult: Decodable {
-    enum Kind: String, Decodable { case ready, saved, signedOut, verification, conflict, rejected, unavailable, unknown }
+struct ForumIntroductionResult: Codable {
+    enum Kind: String, Codable { case ready, saved, signedOut, verification, conflict, rejected, unavailable, unknown }
     let kind: Kind
     var data: ForumIntroduction? = nil
     var message: String? = nil
@@ -152,12 +152,12 @@ struct InboxReadTarget: Hashable {
     var stamp = ""
 }
 
-struct InboxReadResult: Decodable {
+struct InboxReadResult: Codable {
     let kind: String
     let count: Int?
 }
 
-struct ForumNotice: Decodable, Identifiable {
+struct ForumNotice: Codable, Identifiable {
     let id: String
     let author: String
     let authorID: Int?
@@ -187,7 +187,7 @@ struct ForumNotice: Decodable, Identifiable {
     }
 }
 
-struct ForumConversation: Decodable, Identifiable, Equatable {
+struct ForumConversation: Codable, Identifiable, Equatable {
     let id: Int
     let name: String
     let preview: String
@@ -206,7 +206,7 @@ struct ForumConversationContact: Codable, Identifiable, Equatable {
     }
 }
 
-struct ForumMessage: Decodable, Identifiable {
+struct ForumMessage: Codable, Identifiable {
     let id: String
     let text: String
     let date: String
@@ -424,8 +424,8 @@ struct ForumUserReference: Hashable {
     let tags: [String]
 }
 
-struct ForumUserProfile: Decodable {
-    struct Role: Decodable {
+struct ForumUserProfile: Codable, Equatable {
+    struct Role: Codable, Equatable {
         let display_text: String?
     }
 
@@ -444,7 +444,7 @@ struct ForumUserProfile: Decodable {
     var tags: [String] { roles?.compactMap(\.display_text).filter { !$0.isEmpty } ?? [] }
 }
 
-struct ForumUnreadCounts: Decodable, Equatable {
+struct ForumUnreadCounts: Codable, Equatable {
     var mentions = 0
     var replies = 0
     var messages = 0

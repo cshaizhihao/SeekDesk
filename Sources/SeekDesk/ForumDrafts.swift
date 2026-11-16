@@ -7,6 +7,32 @@ struct ForumDraftSnapshot: Codable {
     var messages: [Int: String] = [:]
     var discussion = Discussion()
     var images: [String: [URL: MarkdownImageScale]] = [:]
+    var messageMarkdown: [Int: Bool] = [:]
+
+    init(replies: [String: String] = [:], messages: [Int: String] = [:],
+         discussion: Discussion = Discussion(), images: [String: [URL: MarkdownImageScale]] = [:],
+         messageMarkdown: [Int: Bool] = [:]) {
+        self.replies = replies
+        self.messages = messages
+        self.discussion = discussion
+        self.images = images
+        self.messageMarkdown = messageMarkdown
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case replies, messages, discussion, images, messageMarkdown
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        replies = try values.decodeIfPresent([String: String].self, forKey: .replies) ?? [:]
+        messages = try values.decodeIfPresent([Int: String].self, forKey: .messages) ?? [:]
+        discussion = try values.decodeIfPresent(Discussion.self, forKey: .discussion) ?? Discussion()
+        images = try values.decodeIfPresent([String: [URL: MarkdownImageScale]].self, forKey: .images) ?? [:]
+        // Existing v1 partitions predate the per-peer mode. Missing means the
+        // previous Markdown default; decoding must not discard their drafts.
+        messageMarkdown = try values.decodeIfPresent([Int: Bool].self, forKey: .messageMarkdown) ?? [:]
+    }
 
     struct Discussion: Codable, Equatable {
         var title = ""

@@ -8,11 +8,9 @@ struct WorkspaceView: View {
     @ObservedObject var extensions: DeskExtensions
     @StateObject private var attendance = AttendanceState()
     @StateObject private var sidebarState = SidebarNavigationState()
-    @StateObject private var paneWidths = PaneDragState()
     @StateObject private var tabPointers = TopicTabPointers()
-    @StateObject private var searchAnchors = WorkspaceSearchAnchors()
+    @StateObject private var imageViewer = DeskImageViewer()
     @AppStorage("workspace.sidebarWidth") private var storedSidebarWidth = DeskSidebarSizing.standard
-    @AppStorage("workspace.topicColumnWidth") private var storedListWidth = 340.0
     @AppStorage("workspace.hideListWhileReading") private var hideListWhileReading = false
     @AppStorage("workspace.autoLoadOlder") private var autoLoadOlder = false
     @AppStorage("workspace.autoRefresh") private var autoRefresh = true
@@ -35,6 +33,7 @@ struct WorkspaceView: View {
         if case .compose = forumSession.presentation { return true }
         return false
     }
+    private var contentCovered: Bool { composing || workspace.showingSearch || imageViewer.item != nil }
     private var presentedSheet: Binding<ForumSession.Presentation?> {
         Binding(get: { composing ? nil : forumSession.presentation }, set: { value in
             if !composing || value != nil { forumSession.presentation = value }
@@ -45,27 +44,33 @@ struct WorkspaceView: View {
         guard extensions.active(.attendance), extensions.autoAttendance, forumSession.account == .signedIn else { return nil }
         return forumSession.ownProfile?.id
     }
-    private let navigationRailWidth: CGFloat = 39
 
-    var body: some View {
+    private var sidebarSelectedTitle: String? {
+        switch workspace.destination {
+        case .board(let board): board.title
+        case .shortcut(let shortcut): shortcut.title
+        case .friends: "友情链接"
+        case .mySpace: "我的"
+        case .plugins: "扩展中心"
+        case .settings: "设置"
+        default: nil
+        }
+    }
+
+    private var workspaceSurface: some View {
         GeometryReader { geometry in
             let compact = geometry.size.width < 990
             let sidebarRange = DeskSidebarSizing.bounds(window: geometry.size.width)
-            let baseWidth = clamp(CGFloat(storedSidebarWidth), in: sidebarRange)
-            let sidebarWidth = !compact && workspace.showingSidebar ? clamp(baseWidth + paneWidths.sidebar, in: sidebarRange) : 0
             if extensions.officePresented {
                 OfficeCoverView(palette: palette)
             } else {
-                mainLayout(width: geometry.size.width, compact: compact, sidebarWidth: sidebarWidth, sidebarRange: sidebarRange)
-                    .toolbar { workspaceToolbar(compact: compact) }
+                mainLayout(compact: compact, sidebarRange: sidebarRange)
                     .background {
                         RankingPolling(state: sidebarState.ranking, active: extensions.active(.hot) && !composing &&
                             (workspace.destination == .hot || (sidebarState.section == .ranking &&
                                 (compact ? sidebarState.compactOpen : workspace.showingSidebar))))
                     }
                     .onChange(of: compact) { sidebarState.compactOpen = false }
-                    .allowsHitTesting(!composing && !workspace.showingSearch)
-                    .accessibilityHidden(composing || workspace.showingSearch)
                     .overlay {
                         if composing {
                             NewDiscussionView(session: forumSession, draft: forumSession.newDiscussion, palette: palette) { url in
@@ -80,12 +85,13 @@ struct WorkspaceView: View {
                     .animation(reduceMotion ? nil : DeskMotion.reader, value: composing)
             }
         }
-        .toolbar(extensions.officePresented ? .hidden : .automatic, for: .windowToolbar)
-        .toolbarBackground(windowToolbarBackground, for: .windowToolbar)
+    }
+
+    private var workspaceChrome: some View {
+        workspaceSurface
+        .toolbar(extensions.officePresented || composing ? .hidden : .automatic, for: .windowToolbar)
+        .toolbarBackground(.automatic, for: .windowToolbar)
         .environmentObject(extensions)
-        .background {
-            palette.list.ignoresSafeArea()
-        }
         .overlay { TopicTabDragCanvas(group: tabPointers).allowsHitTesting(false).accessibilityHidden(true) }
         .overlay(alignment: .topTrailing) {
             if !extensions.officePresented && !composing {
@@ -103,9 +109,33 @@ struct WorkspaceView: View {
             }
         }
         .overlay { searchOverlay }
+        .overlay {
+            if let item = imageViewer.item {
+                DeskImageOverlay(item: item, viewer: imageViewer) { imageViewer.item = nil }.id(item.id).zIndex(20)
+            }
+        }
+        .background(DeskImageCoordinateSpace())
+        .environment(\.deskImageViewer, imageViewer)
+        .onChange(of: imageViewer.item?.id) {
+            workspace.presentingContentOverlay = composing || imageViewer.item != nil
+            workspace.dismissImage = imageViewer.item == nil ? nil : { [weak viewer = imageViewer] in viewer?.requestDismiss() }
+        }
+        .onChange(of: composing) { _, active in
+            workspace.presentingContentOverlay = active || imageViewer.item != nil
+            if active {
+                listHasFocus = false
+                sidebarState.compactOpen = false
+            }
+        }
+        .onChange(of: extensions.officePresented) { _, active in if active { imageViewer.item = nil } }
+        .onChange(of: forumSession.accessRevision) { imageViewer.item = nil }
         .tint(palette.accent)
         .frame(minWidth: 630, minHeight: 460)
-        .defaultFocus($listHasFocus, true)
+        .defaultFocus($listHasFocus, !composing)
+    }
+
+    var body: some View {
+        workspaceChrome
         .alert("屏蔽此用户？", isPresented: Binding(
             get: { extensions.pendingBlock != nil },
             set: { if !$0 { extensions.cancelBlock() } }
@@ -126,9 +156,7 @@ struct WorkspaceView: View {
             if !enabled && workspace.destination == .hot { workspace.returnToForum() }
         }
         .task(id: scenePhase == .active && !extensions.officePresented ? extensions.watchPopup?.id : nil) {
-            guard scenePhase == .active, !extensions.officePresented, let id = extensions.watchPopup?.id else { return }
-            do { try await Task.sleep(for: .seconds(12)) } catch { return }
-            if extensions.watchPopup?.id == id { extensions.dismissWatchPopup() }
+            await dismissExpiredWatchPopup()
         }
         .task(id: automaticAttendanceMember) {
             if let member = automaticAttendanceMember {
@@ -172,35 +200,59 @@ struct WorkspaceView: View {
                 }
             }
             }.id(forumSession.accessRevision)
+                .environment(\.deskImageViewer, nil)
         }
     }
 
-    private var windowToolbarBackground: Visibility {
-        if #available(macOS 26.0, *) { return .hidden }
-        return .automatic
+    private func dismissExpiredWatchPopup() async {
+        guard scenePhase == .active, !extensions.officePresented, let id = extensions.watchPopup?.id else { return }
+        do { try await Task.sleep(for: .seconds(12)) } catch { return }
+        if extensions.watchPopup?.id == id { extensions.dismissWatchPopup() }
     }
 
-    private func mainLayout(width: CGFloat, compact: Bool, sidebarWidth: CGFloat, sidebarRange: ClosedRange<CGFloat>) -> some View {
-        let navigationWidth = sidebarWidth > 0 ? sidebarWidth + DeskSidebarSizing.divider : navigationRailWidth
-        return HStack(spacing: 0) {
-            if sidebarWidth > 0 {
-                HStack(spacing: 0) {
-                    sidebar(compact: false)
-                        .frame(width: sidebarWidth - 14, alignment: .leading)
-                        .clipped()
-                        .deskGlass(in: RoundedRectangle(cornerRadius: 18), solid: palette.sidebar)
-                        .padding(.leading, 8).padding(.trailing, 6).padding(.vertical, 7)
-                    resizeDivider("侧栏宽度", width: sidebarWidth, range: sidebarRange, preferred: $storedSidebarWidth,
-                        standard: DeskSidebarSizing.standard, drag: $paneWidths.sidebar)
-                }
-                .transition(.opacity)
-                .zIndex(2)
-            } else {
-                navigationRail(compact: compact).transition(.opacity).zIndex(2)
+    private func mainLayout(compact: Bool, sidebarRange: ClosedRange<CGFloat>) -> some View {
+        NavigationSplitView(columnVisibility: Binding(
+            get: { compact || !workspace.showingSidebar ? .detailOnly : .all },
+            set: { visibility in
+                guard !compact else { return }
+                if visibility == .detailOnly { workspace.showingSidebar = false }
+                else if visibility == .all || visibility == .doubleColumn { workspace.showingSidebar = true }
             }
+        )) {
+            sidebar(compact: false)
+                .allowsHitTesting(!contentCovered)
+                .accessibilityHidden(contentCovered)
+                .frame(minWidth: sidebarRange.lowerBound,
+                    idealWidth: clamp(CGFloat(storedSidebarWidth), in: sidebarRange),
+                    maxWidth: sidebarRange.upperBound, maxHeight: .infinity)
+                .background {
+                    NativeSidebarWidth(preferredWidth: CGFloat(storedSidebarWidth), range: sidebarRange,
+                                       active: !compact && workspace.showingSidebar) { width in
+                        let value = Double(width.rounded())
+                        if abs(storedSidebarWidth - value) >= 1 { storedSidebarWidth = value }
+                    }
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+                }
+                .toolbar(removing: .sidebarToggle)
+                .navigationSplitViewColumnWidth(min: sidebarRange.lowerBound,
+                    ideal: clamp(CGFloat(storedSidebarWidth), in: sidebarRange), max: sidebarRange.upperBound)
+        } detail: {
+            GeometryReader { geometry in
+                destinationPane(width: geometry.size.width, compact: compact)
+                    .allowsHitTesting(!contentCovered)
+                    .accessibilityHidden(contentCovered)
+            }
+            .toolbar { workspaceToolbar(compact: compact) }
+        }
+        .navigationSplitViewStyle(.balanced)
+        .toolbar(removing: .sidebarToggle)
+    }
+
+    @ViewBuilder private func destinationPane(width: CGFloat, compact: Bool) -> some View {
             switch workspace.destination {
             case .board:
-                forumPanes(width: max(1, width - navigationWidth), compact: compact)
+                forumPanes(width: max(1, width), compact: compact)
             case .shortcut(let shortcut):
                 ForumShortcutPane(shortcut: shortcut, session: forumSession, palette: palette,
                     openTopic: workspace.openTopicLink)
@@ -225,8 +277,6 @@ struct WorkspaceView: View {
                 FriendLinksPane(palette: palette, returnTitle: forumReturnTitle,
                                 returnToForum: workspace.returnToForum).modifier(DeskArrival())
             }
-        }
-        .animation(reduceMotion ? nil : DeskMotion.selection, value: workspace.showingSidebar)
     }
 
     private func spacePane(_ person: ForumUserReference?) -> some View {
@@ -247,125 +297,75 @@ struct WorkspaceView: View {
 
     @ToolbarContentBuilder
     private func workspaceToolbar(compact: Bool) -> some ToolbarContent {
-        let home = ToolbarItem(placement: .navigation) {
-            logo(height: 36).fixedSize().disabled(composing || workspace.showingSearch)
+        ToolbarItem(placement: .navigation) {
+            Button {
+                if compact { sidebarState.compactOpen.toggle() }
+                else { workspace.showingSidebar.toggle() }
+            } label: { Label("侧边栏", systemImage: "sidebar.left").labelStyle(.iconOnly) }
+                .help(compact ? "打开导航" : workspace.showingSidebar ? "收起侧栏" : "展开侧栏")
+                .accessibilityLabel(compact ? "打开导航" : workspace.showingSidebar ? "收起侧栏" : "展开侧栏")
+                .disabled(composing || workspace.showingSearch || imageViewer.item != nil)
+                .popover(isPresented: $sidebarState.compactOpen, arrowEdge: .bottom) {
+                    sidebar(compact: true)
+                        .frame(width: clamp(CGFloat(storedSidebarWidth), in: DeskSidebarSizing.range), height: 480)
+                        .deskGlass(in: RoundedRectangle(cornerRadius: 16), solid: palette.chrome)
+                }
         }
-        let controls = ToolbarItem {
-            HStack(spacing: 9) {
-                searchButton(compact: compact)
-                toolbarAccountControls(compact: compact)
-                    .frame(height: 36)
-                    .padding(.horizontal, 5)
-                    .deskGlass(in: Capsule(), solid: palette.chrome)
-                    .disabled(workspace.showingSearch)
-            }
-            .fixedSize()
-            .disabled(composing)
-            .accessibilityElement(children: .contain)
+        ToolbarItem(placement: .navigation) {
+            logo(height: 30).fixedSize().disabled(composing || workspace.showingSearch || imageViewer.item != nil)
         }
         if #available(macOS 26.0, *) {
-            home.sharedBackgroundVisibility(.hidden)
             ToolbarSpacer(.flexible)
-            controls.sharedBackgroundVisibility(.hidden)
-        } else {
-            home
-            controls
+        }
+        ToolbarItem {
+            searchButton(compact: compact)
+                .disabled(composing || imageViewer.item != nil || workspace.showingSearch)
+        }
+        ToolbarItemGroup {
+            if extensions.active(.office) {
+                Button { extensions.officePresented = true } label: {
+                    Label(extensions.officeButton.isEmpty ? "切换办公视图" : extensions.officeButton, systemImage: "tablecells.fill")
+                        .labelStyle(.iconOnly)
+                }
+                .keyboardShortcut(extensions.shortcut, modifiers: [.command, .shift])
+                .disabled(composing || imageViewer.item != nil || workspace.showingSearch)
+            }
+            Button(action: showNotifications) {
+                ToolbarNotificationLabel(count: forumSession.unread.total, tint: palette.unread)
+            }
+            .help("通知").accessibilityLabel("通知")
+            .accessibilityValue(forumSession.unread.total > 0 ? "\(forumSession.unread.total) 条未读" : "无未读")
+            .disabled(composing || imageViewer.item != nil || workspace.showingSearch)
+            accountButton(compact: compact)
+                .disabled(composing || imageViewer.item != nil || workspace.showingSearch)
         }
     }
 
     private func searchButton(compact: Bool) -> some View {
-        let expandedWidth: CGFloat = compact ? 150 : 236
-        let expanded = searchAnchors.hovering
-        return Button(action: workspace.beginSearch) {
-            HStack(spacing: 7) {
-                Image(systemName: "magnifyingglass")
-                    .scaleEffect(expanded && !reduceMotion ? 1.13 : 1)
-                    .animation(reduceMotion ? nil : .spring(duration: 0.24, bounce: 0.22),
-                               value: expanded)
-                Text(compact ? "搜索" : "搜索帖子").fontWeight(.medium).fixedSize()
-            }
-            .font(.system(size: 12))
-            .foregroundStyle(.secondary)
-            .padding(.leading, 11)
-            .frame(width: expanded ? expandedWidth : expandedWidth / 2, height: 36, alignment: .leading)
-            .overlay(alignment: .trailing) {
-                Text("⌘ K").font(.caption.monospaced()).foregroundStyle(.secondary)
-                    .padding(.trailing, 11)
-                    .opacity(expanded ? 1 : 0)
-                    .accessibilityHidden(true)
-            }
-            .background(palette.chrome.opacity(0.20), in: Capsule())
-            .contentShape(Capsule())
+        Button(action: workspace.beginSearch) {
+            Label(compact ? "搜索" : "搜索帖子", systemImage: "magnifyingglass")
+                .labelStyle(.titleAndIcon)
         }
-        .buttonStyle(DeskButtonStyle())
-        .deskGlass(in: Capsule(), solid: palette.chrome, interactive: true)
-        .animation(reduceMotion ? nil : .smooth(duration: 0.23), value: expanded)
-        .onHover { searchAnchors.hovering = $0 }
-        .background { WorkspaceSearchAnchor { searchAnchors.button = $0 } }
-        // The search capsule grows toward the center without shifting adjacent controls.
-        .frame(width: expandedWidth, alignment: .trailing)
         .accessibilityHidden(workspace.showingSearch)
         .help("按版块搜索或打开帖子链接 · ⌘K")
-    }
-
-    private func toolbarAccountControls(compact: Bool) -> some View {
-        HStack(spacing: 7) {
-            if extensions.active(.office) {
-                toolButton(extensions.officeButton.isEmpty ? "切换办公视图" : extensions.officeButton, icon: "tablecells.fill") { extensions.officePresented = true }
-                    .keyboardShortcut(extensions.shortcut, modifiers: [.command, .shift])
-            }
-            Button(action: showNotifications) {
-                Label("通知", systemImage: "bell").labelStyle(.iconOnly)
-                    .font(.system(size: 15, weight: .medium)).frame(width: 27, height: 27)
-            }
-            .buttonStyle(DeskButtonStyle(compresses: true))
-            .help("通知").accessibilityLabel("通知")
-            .overlay(alignment: .topTrailing) { unreadBadge }
-            .accessibilityValue(forumSession.unread.total > 0 ? "\(forumSession.unread.total) 条未读" : "无未读")
-            accountButton(compact: compact)
-        }
-        .padding(.horizontal, 5)
     }
 
     @ViewBuilder private func accountButton(compact: Bool) -> some View {
         if let profile = forumSession.ownProfile {
             Button(action: workspace.showMySpace) {
-                HStack(spacing: 8) {
-                    ForumAvatar(url: Forum.avatar(profile.id), size: 28, palette: palette)
-                    VStack(alignment: .leading, spacing: 2) {
-                        HStack(spacing: 6) {
-                            Text(profile.name).font(.system(size: 13, weight: .semibold)).lineLimit(1)
-                                .frame(maxWidth: compact ? 94 : 135, alignment: .leading)
-                            if !compact {
-                                Text("#\(profile.id)").font(.system(size: 11).monospacedDigit())
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                        HStack(spacing: 6) {
-                            if let rank = profile.rank {
-                                Text("Lv \(rank)").foregroundStyle(palette.accent)
-                            }
-                            if let coin = profile.coin {
-                                HStack(spacing: 3) {
-                                    DeskIcon("fork.knife", asset: "asset-chicken-leg", size: 12).foregroundStyle(palette.featured)
-                                    Text(coin.formatted()).monospacedDigit()
-                                }
-                            }
-                        }
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.secondary)
+                HStack(spacing: 7) {
+                    ForumAvatar(url: Forum.avatar(profile.id), size: 22, palette: palette)
+                    if !compact {
+                        Text(profile.name).font(.system(size: 13, weight: .medium)).lineLimit(1)
+                            .frame(maxWidth: 120, alignment: .leading)
                     }
-                    DeskIcon("chevron.down", size: 9).font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(.secondary)
                 }
-                .padding(.leading, 4).padding(.trailing, 2).frame(height: 34)
-                .contentShape(Capsule())
+                .padding(.horizontal, 2)
             }
-            .buttonStyle(DeskButtonStyle())
             .fixedSize(horizontal: true, vertical: false)
             .accessibilityLabel("个人资料 · \(profile.name) · 用户 #\(profile.id)")
             .accessibilityValue([profile.rank.map { "等级 \($0)" }, profile.coin.map { "\($0) 个鸡腿" }].compactMap { $0 }.joined(separator: "，"))
-            .help("个人资料 · 用户 #\(profile.id)")
+            .help(["个人资料 · \(profile.name) · #\(profile.id)", profile.rank.map { "Lv \($0)" }, profile.coin.map { "\($0.formatted()) 个鸡腿" }].compactMap { $0 }.joined(separator: " · "))
         } else if forumSession.account == .signedOut {
             toolButton("登录 NodeSeek", icon: "person.crop.circle", action: forumSession.signIn)
         } else {
@@ -392,8 +392,7 @@ struct WorkspaceView: View {
                 .padding(.leading, 8)
         }
         .padding(12)
-        .background(palette.reader, in: RoundedRectangle(cornerRadius: 12))
-        .overlay { RoundedRectangle(cornerRadius: 12).strokeBorder(palette.line).allowsHitTesting(false) }
+        .deskGlass(in: RoundedRectangle(cornerRadius: 16), solid: palette.reader)
         .shadow(color: .black.opacity(palette.dark ? 0.35 : 0.12), radius: 12, x: 0, y: 4)
         .accessibilityElement(children: .contain)
     }
@@ -424,7 +423,7 @@ struct WorkspaceView: View {
                         DeskIcon("arrow.up.right", size: 12).font(.caption).foregroundStyle(palette.accent)
                     }
                     .padding(.horizontal, 8).padding(.vertical, 6)
-                    .background(palette.list, in: RoundedRectangle(cornerRadius: 6))
+                    .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 6))
                 }
                 .buttonStyle(DeskButtonStyle())
                 .help("打开帖子")
@@ -435,42 +434,9 @@ struct WorkspaceView: View {
             }
         }
         .padding(12).frame(width: 332)
-        .background(palette.reader, in: RoundedRectangle(cornerRadius: 12))
-        .overlay { RoundedRectangle(cornerRadius: 12).strokeBorder(palette.line).allowsHitTesting(false) }
+        .deskGlass(in: RoundedRectangle(cornerRadius: 16), solid: palette.reader)
         .shadow(color: .black.opacity(palette.dark ? 0.35 : 0.12), radius: 12, x: 0, y: 4)
         .accessibilityElement(children: .contain)
-    }
-
-    private func navigationRail(compact: Bool) -> some View {
-        VStack(spacing: 0) {
-            if compact {
-                sidebarControl("打开导航") { sidebarState.compactOpen.toggle() }
-                    .popover(isPresented: $sidebarState.compactOpen, arrowEdge: .trailing) {
-                        sidebar(compact: true)
-                            .frame(width: clamp(CGFloat(storedSidebarWidth), in: DeskSidebarSizing.range), height: 440)
-                    }
-            } else {
-                sidebarControl("展开侧栏") { workspace.showingSidebar = true }
-            }
-        }
-        .padding(.top, 12)
-        .frame(width: navigationRailWidth)
-        .frame(maxHeight: .infinity, alignment: .top)
-        .background(palette.chrome)
-        .overlay(alignment: .trailing) { verticalRule.allowsHitTesting(false) }
-    }
-
-    private func sidebarControl(_ title: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            DeskIcon("sidebar.left", size: 14)
-                .font(.system(size: 14, weight: .medium))
-                .foregroundStyle(.secondary)
-                .frame(width: 29, height: 35)
-                .background(palette.reader.opacity(0.7), in: RoundedRectangle(cornerRadius: 7))
-                .overlay { RoundedRectangle(cornerRadius: 7).strokeBorder(palette.line).allowsHitTesting(false) }
-        }
-        .buttonStyle(DeskButtonStyle(compresses: true))
-        .help(title).accessibilityLabel(title)
     }
 
     private func sidebar(compact: Bool) -> some View {
@@ -486,23 +452,23 @@ struct WorkspaceView: View {
                     DeskLabel("发帖", systemImage: "plus")
                         .font(.system(size: 13, weight: .semibold))
                         .frame(maxWidth: .infinity).frame(height: 35)
-                        .foregroundStyle(.white)
-                        .background(palette.publish, in: Capsule())
-                        .contentShape(Capsule())
+                        .contentShape(Rectangle())
                 }
-                .buttonStyle(DeskButtonStyle(compresses: true))
-                sidebarControl("收起侧栏") {
-                    if compact { sidebarState.compactOpen = false }
-                    else { workspace.showingSidebar = false }
-                }
+                .deskGlassButtonStyle(prominent: true).tint(palette.publish).controlSize(.large)
             }
             .padding(.horizontal, 11).padding(.top, 12).padding(.bottom, 5)
-            boardButton(.home).padding(.horizontal, 11).padding(.bottom, 9)
+            DeskGlassSelectionGroup(selection: workspace.destination == .board(.home) ? Board.home.title : nil, solid: palette.selection) {
+                boardButton(.home)
+            }
+            .padding(.horizontal, 11).padding(.bottom, 9)
             GeometryReader { geometry in
                 sidebarRoll(height: geometry.size.height)
             }
             .padding(.horizontal, 11).padding(.bottom, 8)
             rule.padding(.horizontal, 16).padding(.bottom, 8)
+            DeskGlassSelectionGroup(selection: ["友情链接", "我的", "扩展中心", "设置"].contains(sidebarSelectedTitle ?? "") ? sidebarSelectedTitle : nil,
+                                    solid: palette.selection) {
+            VStack(spacing: 0) {
             navButton("友情链接", icon: "link", selected: workspace.destination == .friends) {
                 workspace.showFriends()
                 sidebarState.compactOpen = false
@@ -529,6 +495,8 @@ struct WorkspaceView: View {
                 sidebarState.compactOpen = false
             }
             .padding(.horizontal, 10).padding(.bottom, 12)
+            }
+            }
         }
     }
 
@@ -537,72 +505,85 @@ struct WorkspaceView: View {
         let hasRanking = extensions.active(.hot)
         let headerHeight = max(34, boardTextSize + 19)
         let rowHeight = max(34, boardTextSize + 17)
-        let bodyHeight = max(0, height - headerHeight * (hasRanking ? 3 : 2) - (hasRanking ? 12 : 6))
-        return VStack(spacing: 6) {
+        let bodyHeight = max(0, height - headerHeight * (hasRanking ? 3 : 2) - (hasRanking ? 16 : 8))
+        return VStack(spacing: 8) {
             VStack(spacing: 0) {
                 rollHeader("论坛版块", icon: "square.grid.2x2", section: .boards, height: headerHeight)
-                ScrollView {
-                    VStack(spacing: 2) { ForEach(Board.sections, content: boardButton) }
+                if active == .boards {
+                    ScrollView {
+                        DeskGlassSelectionGroup(selection: Board.sections.contains(where: { $0.title == sidebarSelectedTitle }) ? sidebarSelectedTitle : nil,
+                                                solid: palette.selection) {
+                            VStack(spacing: 2) { ForEach(Board.sections, content: boardButton) }
+                        }
                         .padding(.top, 4)
+                    }
+                    .scrollIndicators(.never)
+                    .frame(height: min(bodyHeight, CGFloat(Board.sections.count) * (rowHeight + 2) + 4), alignment: .top)
+                    .clipped()
+                    .transition(.opacity)
                 }
-                .scrollIndicators(.never)
-                .frame(height: active == .boards ? min(bodyHeight, CGFloat(Board.sections.count) * (rowHeight + 2) + 4) : 0, alignment: .top)
-                .clipped().opacity(active == .boards ? 1 : 0)
-                .allowsHitTesting(active == .boards).accessibilityHidden(active != .boards)
             }
             VStack(spacing: 0) {
                 rollHeader("快捷功能区", icon: "bolt", section: .shortcuts, height: headerHeight)
-                ScrollView {
-                    VStack(spacing: 2) {
-                        ForEach(ForumShortcut.allCases) { shortcut in
-                            navButton(shortcut.title, icon: shortcut.icon,
-                                selected: workspace.destination == .init(shortcut: shortcut), fontSize: boardTextSize) {
-                                sidebarState.compactOpen = false
-                                workspace.showShortcut(shortcut)
+                if active == .shortcuts {
+                    ScrollView {
+                        DeskGlassSelectionGroup(selection: ForumShortcut.allCases.contains(where: { $0.title == sidebarSelectedTitle }) ? sidebarSelectedTitle : nil,
+                                                solid: palette.selection) {
+                        VStack(spacing: 2) {
+                            ForEach(ForumShortcut.allCases) { shortcut in
+                                navButton(shortcut.title, icon: shortcut.icon,
+                                    selected: workspace.destination == .init(shortcut: shortcut), fontSize: boardTextSize) {
+                                    sidebarState.compactOpen = false
+                                    workspace.showShortcut(shortcut)
+                                }
                             }
                         }
+                        }
+                        .padding(.top, 4)
                     }
-                    .padding(.top, 4)
+                    .scrollIndicators(.never)
+                    .frame(height: min(bodyHeight, CGFloat(ForumShortcut.allCases.count) * (rowHeight + 2) + 4), alignment: .top)
+                    .clipped()
+                    .transition(.opacity)
                 }
-                .scrollIndicators(.never)
-                .frame(height: active == .shortcuts ? min(bodyHeight, CGFloat(ForumShortcut.allCases.count) * (rowHeight + 2) + 4) : 0, alignment: .top)
-                .clipped().opacity(active == .shortcuts ? 1 : 0)
-                .allowsHitTesting(active == .shortcuts).accessibilityHidden(active != .shortcuts)
             }
             if hasRanking {
                 VStack(spacing: 0) {
                     rollHeader("热榜", icon: "flame", section: .ranking, height: headerHeight)
-                    SidebarHotRanking(palette: palette, state: sidebarState.ranking, availableHeight: max(0, bodyHeight - 4)) {
-                        workspace.showHot()
-                        sidebarState.compactOpen = false
-                    } openTopic: { url in
-                        sidebarState.compactOpen = false
-                        return workspace.openTopicLink(url)
+                    if active == .ranking {
+                        SidebarHotRanking(palette: palette, state: sidebarState.ranking, availableHeight: max(0, bodyHeight - 4)) {
+                            workspace.showHot()
+                            sidebarState.compactOpen = false
+                        } openTopic: { url in
+                            sidebarState.compactOpen = false
+                            return workspace.openTopicLink(url)
+                        }
+                        .padding(.top, 4)
+                        .frame(height: bodyHeight, alignment: .top)
+                        .clipped()
+                        .transition(.opacity)
                     }
-                    .padding(.top, 4)
-                    .frame(height: active == .ranking ? bodyHeight : 0, alignment: .top)
-                    .clipped().opacity(active == .ranking ? 1 : 0)
-                    .allowsHitTesting(active == .ranking).accessibilityHidden(active != .ranking)
                 }
             }
         }
-        .animation(reduceMotion ? nil : DeskMotion.pane, value: active)
+        .animation(reduceMotion ? nil : DeskMotion.reader, value: active)
     }
 
     private func rollHeader(_ title: String, icon: String, section: SidebarNavigationState.Section, height: CGFloat) -> some View {
         let open = sidebarState.section == section
-        return Button { sidebarState.section = open ? nil : section } label: {
+        return Button {
+            sidebarState.section = open ? nil : section
+        } label: {
             HStack(spacing: 9) {
                 DeskIcon(icon, size: 12).font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(palette.accent).frame(width: 18)
-                Text(title).font(.system(size: boardTextSize, weight: .semibold))
+                    .foregroundStyle(open ? palette.accent : Color.secondary).frame(width: 18)
+                Text(title).font(.system(size: boardTextSize))
                 Spacer()
                 DeskIcon("chevron.down", size: 10).font(.system(size: 10, weight: .semibold))
                     .foregroundStyle(.secondary).rotationEffect(.degrees(open ? 180 : 0))
+                    .animation(reduceMotion ? nil : DeskMotion.selection, value: open)
             }
             .padding(.horizontal, 10).frame(height: height)
-            .background(palette.reader.opacity(0.54), in: RoundedRectangle(cornerRadius: 7))
-            .overlay { RoundedRectangle(cornerRadius: 7).strokeBorder(palette.line.opacity(0.84)).allowsHitTesting(false) }
             .contentShape(Rectangle())
         }
         .buttonStyle(DeskButtonStyle())
@@ -645,53 +626,31 @@ struct WorkspaceView: View {
                 }
             }
             .frame(width: 18)
-            Text(title)
+            Text(title).lineLimit(1)
         }
-        .font(.system(size: fontSize, weight: selected ? .semibold : .medium))
+        .font(.system(size: fontSize, weight: selected ? .medium : .regular))
         .foregroundStyle(selected ? palette.accent : Color.primary)
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 11).frame(height: max(34, fontSize + 17))
-        .background(selected ? palette.selection : .clear, in: RoundedRectangle(cornerRadius: 7))
-        .animation(motion, value: selected)
+        .deskGlassSelectionItem(title, selected: selected)
     }
 
     private func forumPanes(width: CGFloat, compact: Bool) -> some View {
         let topic = workspace.showReader ? workspace.session.selectedTopic : nil
         let reading = topic != nil
         let listVisible = !reading || (!compact && !hideListWhileReading)
-        let split = reading && listVisible
-        let divider = DeskSidebarSizing.divider
-        let maxListWidth = max(240, min(620, width - 412 - divider))
-        let listRange: ClosedRange<CGFloat> = 240...maxListWidth
-        let hasListColumn = reading && !compact
-        let listWidth = hasListColumn ? clamp(clamp(CGFloat(storedListWidth), in: listRange) + paneWidths.list, in: listRange) : width
-        let visibleListWidth = listVisible ? listWidth + (split ? divider : 0) : 0
-        let panes = HStack(spacing: 0) {
-            HStack(spacing: 0) {
-                feedPane
-                    .frame(width: listWidth)
-                    .focusable(listVisible, interactions: .edit)
-                    .focused($listHasFocus)
-                    .focusEffectDisabled()
-                    .onKeyPress(keys: [.upArrow, .downArrow, .return, KeyEquivalent("\u{3}")], action: handleListKey)
-                if hasListColumn {
-                    resizeDivider("帖子列表宽度", width: listWidth, range: listRange, preferred: $storedListWidth,
-                        standard: 340, drag: $paneWidths.list)
-                }
-            }
-            .frame(width: visibleListWidth, alignment: .trailing)
-            .mask {
-                Rectangle().ignoresSafeArea(.container, edges: .top)
-            }
-            .disabled(!listVisible)
-            .accessibilityHidden(!listVisible)
-            .allowsHitTesting(listVisible)
+        let panes = ForumPaneColumns(width: width, reading: reading, compact: compact,
+                                     listVisible: listVisible, palette: palette) {
+            feedPane
+                .focusable(listVisible, interactions: .edit)
+                .focused($listHasFocus)
+                .focusEffectDisabled()
+                .onKeyPress(keys: [.upArrow, .downArrow, .return, KeyEquivalent("\u{3}")], action: handleListKey)
+        } reader: {
             if let topic {
                 readerPane(topic: topic)
-                    .transition(.opacity)
             }
         }
-        .frame(width: width, alignment: .leading)
         let canToggleList = reading && !compact
         return Group {
             if #available(macOS 26.0, *) {
@@ -700,8 +659,6 @@ struct WorkspaceView: View {
                 panes.safeAreaInset(edge: .top, spacing: 0) { topicTabs(canToggleList: canToggleList) }
             }
         }
-        .animation(reduceMotion ? nil : DeskMotion.selection, value: reading)
-        .animation(reduceMotion ? nil : DeskMotion.pane, value: split)
         .onChange(of: listVisible, initial: true) { _, visible in
             if !visible { listHasFocus = false }
             else if !reading { listHasFocus = true }
@@ -719,48 +676,9 @@ struct WorkspaceView: View {
 
     @ViewBuilder private func topicTabs(canToggleList: Bool) -> some View {
         if !workspace.session.topics.isEmpty {
-            VStack(spacing: 0) {
-                tabBar(canToggleList: canToggleList)
-                rule
-            }
+            Group { tabBar(canToggleList: canToggleList) }
+                .padding(.horizontal, 8).padding(.vertical, 6)
         }
-    }
-
-    private func resizeDivider(_ title: String, width: CGFloat, range: ClosedRange<CGFloat>, preferred: Binding<Double>,
-                               standard: Double, drag: Binding<CGFloat>) -> some View {
-        let base = clamp(CGFloat(preferred.wrappedValue), in: range)
-        let dragging = drag.wrappedValue != 0
-        return ZStack {
-            Rectangle().fill(palette.list)
-            verticalRule
-            Capsule().fill(palette.accent.opacity(dragging ? 0.92 : 0.37))
-                .frame(width: 3, height: dragging ? 34 : 24)
-        }
-            .frame(width: DeskSidebarSizing.divider)
-            .overlay {
-                DeskResizeHandle(
-                    change: { drag.wrappedValue = $0 },
-                    finish: { delta in
-                        withTransaction(Transaction(animation: nil)) {
-                            drag.wrappedValue = 0
-                            if delta != 0 { preferred.wrappedValue = Double(clamp(base + delta, in: range)) }
-                        }
-                    },
-                    reset: { preferred.wrappedValue = standard }
-                )
-            }
-            .zIndex(1)
-            .help("拖动调整\(title)，双击恢复默认")
-            .accessibilityElement()
-            .accessibilityLabel(title)
-            .accessibilityValue("\(Int(width)) 点")
-            .accessibilityAdjustableAction { direction in
-                switch direction {
-                case .increment: preferred.wrappedValue = Double(clamp(base + 24, in: range))
-                case .decrement: preferred.wrappedValue = Double(clamp(base - 24, in: range))
-                @unknown default: break
-                }
-            }
     }
 
     private func clamp(_ value: CGFloat, in bounds: ClosedRange<CGFloat>) -> CGFloat {
@@ -788,9 +706,16 @@ struct WorkspaceView: View {
         VStack(alignment: .leading, spacing: 0) {
             feedBody
         }
+        .safeAreaInset(edge: .top, spacing: 0) {
+            Group {
+                feedHeader
+                    .deskGlass(in: RoundedRectangle(cornerRadius: 16), solid: palette.list)
+            }
+            .padding(10)
+        }
         .safeAreaInset(edge: .bottom, spacing: 0) {
+            DeskGlassGroup {
             VStack(spacing: 0) {
-                rule
                 if workspace.hasOlderPosts {
                     Button {
                         Task { await workspace.loadOlder() }
@@ -804,7 +729,9 @@ struct WorkspaceView: View {
                 }
                 feedStatus
             }
-            .background(palette.list)
+            .deskGlass(in: RoundedRectangle(cornerRadius: 14), solid: palette.list)
+            }
+            .padding(.horizontal, 10).padding(.bottom, 8).padding(.top, 4)
         }
         .background(palette.list)
     }
@@ -815,7 +742,7 @@ struct WorkspaceView: View {
                 if workspace.board == .award {
                     FeaturedDiamondIcon(size: 20, color: palette.featured).accessibilityHidden(true)
                 }
-                Text(workspace.query.isEmpty ? workspace.board.title : "搜索结果").font(.system(size: 20, weight: .bold))
+                Text(workspace.query.isEmpty ? workspace.board.title : "搜索结果").font(.system(size: 19, weight: .semibold))
                 Spacer()
                 Button { Task { await workspace.refresh() } } label: {
                     DeskRefreshLabel(title: "刷新列表", loading: workspace.isLoading)
@@ -825,10 +752,12 @@ struct WorkspaceView: View {
                 .help("刷新当前列表 · ⌘R")
             }
             if workspace.query.isEmpty && workspace.board == .home {
-                Picker("首页排序", selection: Binding(get: { workspace.feedOrder }, set: workspace.chooseFeedOrder)) {
-                    ForEach(ForumFeedOrder.allCases) { order in Text(order.title).tag(order) }
+                DeskGlassPicker(values: ForumFeedOrder.allCases,
+                                selection: Binding(get: { workspace.feedOrder }, set: workspace.chooseFeedOrder),
+                                tint: palette.accent, solid: palette.selection, compact: true) { order, _ in
+                    Text(order.title).font(.system(size: 12, weight: .semibold))
                 }
-                .pickerStyle(.segmented).labelsHidden().accessibilityLabel("首页排序")
+                .accessibilityLabel("首页排序")
             } else if workspace.query.isEmpty {
                 Text(workspace.board == .award ? "论坛推荐" : workspace.feedOrder.title)
                     .font(.system(size: 11, weight: .semibold))
@@ -855,7 +784,7 @@ struct WorkspaceView: View {
                 }
             }
         }
-        .padding(.horizontal, 17).padding(.vertical, 15)
+        .padding(.horizontal, 20).padding(.vertical, 16)
     }
 
     private var feedStatus: some View {
@@ -901,8 +830,6 @@ struct WorkspaceView: View {
         if !posts.isEmpty || workspace.showsPeopleResults {
             ScrollViewReader { proxy in
                 let scroll = ScrollView {
-                    feedHeader
-                    rule
                     if workspace.showsPeopleResults {
                         peopleResults
                         if workspace.showsPostResults {
@@ -921,7 +848,7 @@ struct WorkspaceView: View {
                         ForEach(posts) { post in
                             VStack(spacing: 0) {
                                 feedRow(post)
-                                rule.padding(.leading, 10)
+                                rule.opacity(0.55).padding(.leading, max(30, listTextSize + 14) + 24).padding(.trailing, 13)
                             }
                             .id(post.id)
                         }
@@ -935,7 +862,7 @@ struct WorkspaceView: View {
                                 .accessibilityHidden(true)
                         }
                     }
-                    .padding(.horizontal, 8).padding(.vertical, 5)
+                    .padding(.horizontal, 9).padding(.vertical, 6)
                 }
                 .scrollContentBackground(.hidden)
                 Group {
@@ -955,8 +882,6 @@ struct WorkspaceView: View {
             .id(FeedFilter(board: workspace.board, query: workspace.query, scope: workspace.appliedSearchScope,
                            kind: workspace.appliedSearchKind))
         } else {
-            feedHeader
-            rule
             Group {
                 if workspace.isLoading && (workspace.posts.isEmpty || workspace.isSearchingForum) {
                     ProgressView(workspace.isSearchingForum ? "正在搜索论坛历史帖子…" : "正在读取\(contentName)…").controlSize(.small)
@@ -1034,17 +959,20 @@ struct WorkspaceView: View {
             TopicListRowLabel(title: post.title, author: post.author, time: post.published?.formatted(.relative(presentation: .named)),
                               category: post.category, avatarURL: post.avatarURL, titleSize: listTextSize, palette: palette, selected: selected,
                               readingRank: post.readingRank, featured: post.featured == true, blocked: blocked)
-            .background(selected ? palette.selection : .clear, in: RoundedRectangle(cornerRadius: 7))
+            .background {
+                RoundedRectangle(cornerRadius: 9).fill(selected ? palette.selection : .clear)
+                    .animation(motion, value: selected)
+            }
             .overlay(alignment: .leading) {
                 Capsule().fill(palette.accent).frame(width: 2).padding(.vertical, 10)
                     .opacity(selected ? 1 : 0).allowsHitTesting(false)
+                    .animation(motion, value: selected)
             }
             .overlay {
-                RoundedRectangle(cornerRadius: 7).strokeBorder(palette.accent.opacity(focused ? 0.75 : 0))
+                RoundedRectangle(cornerRadius: 9).strokeBorder(palette.accent.opacity(focused ? 0.48 : 0))
                     .allowsHitTesting(false)
+                    .animation(reduceMotion ? nil : DeskMotion.feedback, value: focused)
             }
-            .animation(motion, value: selected)
-            .animation(reduceMotion ? nil : DeskMotion.feedback, value: focused)
         }
         .buttonStyle(DeskButtonStyle())
         .accessibilityAddTraits(selected ? .isSelected : [])
@@ -1091,14 +1019,16 @@ struct WorkspaceView: View {
             }
             ScrollViewReader { proxy in
                 ScrollView(.horizontal) {
-                    LazyHStack(spacing: 6) {
-                        ForEach(workspace.session.topics) { topic in
-                            tab(topic).id(topic.id)
+                    DeskGlassSelectionGroup(selection: workspace.session.selection, solid: palette.selection, vertical: false) {
+                        LazyHStack(spacing: 6) {
+                            ForEach(workspace.session.topics) { topic in
+                                tab(topic).id(topic.id)
+                            }
                         }
                     }
                     .padding(.leading, 12).padding(.vertical, 8)
                 }
-                .scrollIndicators(.hidden)
+                .scrollIndicators(.never)
                 .onAppear {
                     if let id = workspace.session.selection { proxy.scrollTo(id) }
                 }
@@ -1108,19 +1038,29 @@ struct WorkspaceView: View {
                     }
                 }
             }
-            if extensions.active(.value), workspace.showReader, let topic = workspace.session.selectedTopic {
-                RemainingValueButton(palette: palette, topic: topic, topicName: topicTitle(topic))
-            }
             toolButton("关闭全部帖子标签", icon: "xmark.rectangle", action: workspace.closeAllTabs)
             Menu {
                 ForEach(workspace.session.topics) { topic in Button(topicTitle(topic)) { workspace.select(topic.id) } }
+                if !workspace.session.closedTopics.isEmpty {
+                    Divider()
+                    Button("恢复关闭的帖子") { workspace.reopenClosedTab() }
+                    Menu("最近关闭") {
+                        ForEach(workspace.session.closedTopics.reversed()) { entry in
+                            Button(entry.topic.label) { workspace.reopenClosedTab(entry.id) }
+                        }
+                    }
+                }
             } label: { DeskIcon("rectangle.on.rectangle", nativeMenu: true).foregroundStyle(.secondary) }
             .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
-            .help("已打开的帖子 · ⌃Tab 切换标签").accessibilityLabel("已打开的帖子")
+            .help("已打开与最近关闭的帖子 · ⌃Tab 切换 · ⌘⇧T 恢复").accessibilityLabel("已打开的帖子")
+            if extensions.active(.value), workspace.showReader, let topic = workspace.session.selectedTopic {
+                RemainingValueButton(palette: palette, topic: topic, topicName: topicTitle(topic))
+                    .fixedSize(horizontal: true, vertical: false)
+            }
         }
         .padding(.trailing, 12)
         .frame(height: 45)
-        .background(palette.chrome, ignoresSafeAreaEdges: [])
+        .deskGlass(in: RoundedRectangle(cornerRadius: 14), solid: palette.chrome)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("帖子标签")
     }
@@ -1155,9 +1095,7 @@ struct WorkspaceView: View {
         }
         .font(.system(size: 12, weight: .medium))
         .foregroundStyle(selected ? palette.accent : .secondary)
-        .background(selected ? palette.selection : palette.surface, in: RoundedRectangle(cornerRadius: 6))
-        .overlay { RoundedRectangle(cornerRadius: 6).strokeBorder(selected ? palette.accent : .clear).allowsHitTesting(false) }
-        .animation(motion, value: selected)
+        .deskGlassSelectionItem(topic.id, selected: selected)
         .contextMenu {
             let ids = workspace.session.topics.map(\.id)
             if let index = ids.firstIndex(of: topic.id) {
@@ -1169,6 +1107,8 @@ struct WorkspaceView: View {
                 }
             }
             Button("关闭全部标签", action: workspace.closeAllTabs)
+            Button("恢复关闭的帖子") { workspace.reopenClosedTab() }
+                .disabled(workspace.session.closedTopics.isEmpty)
         }
     }
 
@@ -1179,48 +1119,105 @@ struct WorkspaceView: View {
             restoreReadingPosition: workspace.readingReturnURL == topic.url,
             openTopic: workspace.openTopicLink,
             isCurrent: { workspace.session.selectedTopic?.url == topic.url && workspace.showReader && inForum })
-            .id("\(Forum.pageURL(topic.url))|\(forumSession.accessRevision)")
+            .id("\(Forum.pageURL(topic.url))|\(forumSession.accessRevision)|\(workspace.readerNavigationRevision)")
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .clipped()
     }
 
     private var searchOverlay: some View {
         GeometryReader { geometry in
-            let origin = searchAnchors.buttonFrame ??
-                CGRect(x: geometry.size.width - 250, y: -30, width: 180, height: 30)
-            let center = CGPoint(x: geometry.size.width / 2, y: geometry.size.height / 2)
             ZStack {
                 if workspace.showingSearch {
-                    Rectangle().fill(.black.opacity(palette.dark ? 0.34 : 0.16))
+                    Rectangle().fill(.black.opacity(palette.dark ? 0.18 : 0.08))
                         .ignoresSafeArea()
                         .onTapGesture(perform: dismissSearch)
                         .accessibilityHidden(true)
                         .transition(.opacity)
-                    searchPanel(availableHeight: geometry.size.height)
-                        .transition(reduceMotion ? .opacity : AnyTransition(WorkspaceSearchExpansion(source: origin, center: center)))
+                    WorkspaceSearchPanel(workspace: workspace, draft: workspace.searchDraft,
+                                         palette: palette, availableHeight: geometry.size.height)
+                        .transition(.opacity)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .background { WorkspaceSearchAnchor { searchAnchors.viewport = $0 } }
         .allowsHitTesting(workspace.showingSearch)
         .accessibilityHidden(!workspace.showingSearch)
-        .animation(reduceMotion ? .easeOut(duration: 0.12) : .smooth(duration: 0.34, extraBounce: 0.03),
-                   value: workspace.showingSearch)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.16), value: workspace.showingSearch)
     }
 
-    private func searchPanel(availableHeight: CGFloat) -> some View {
+    private func dismissSearch() {
+        workspace.showingSearch = false
+    }
+
+    private func showNotifications() {
+        workspace.showNotifications()
+        Task { await forumSession.refreshUnread() }
+    }
+
+    private func toolButton(_ title: String, icon: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Label {
+                Text(title)
+            } icon: {
+                DeskIcon(icon, size: 14).font(.system(size: 14, weight: .medium)).frame(width: 27, height: 27)
+            }
+            .labelStyle(.iconOnly)
+        }
+            .buttonStyle(DeskButtonStyle(compresses: true))
+            .foregroundStyle(.secondary)
+            .help(title).accessibilityLabel(title)
+    }
+
+}
+
+/// The badge participates in the native toolbar button's measured size.
+/// It stays inside the label, including multi-digit counts and narrow toolbars.
+private struct ToolbarNotificationLabel: View {
+    let count: Int
+    let tint: Color
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        HStack(spacing: 2) {
+            Image(systemName: "bell")
+                .frame(width: 18, height: 24)
+            if count > 0 {
+                Text(count > 99 ? "99+" : String(count))
+                    .font(.system(size: 9, weight: .bold)).monospacedDigit()
+                    .foregroundStyle(.white)
+                    .fixedSize()
+                    .padding(.horizontal, 4).frame(minWidth: 15, minHeight: 15)
+                    .background(tint, in: Capsule())
+                    .contentTransition(reduceMotion ? .identity : .numericText(value: Double(count)))
+                    .padding(.top, 1)
+                    .frame(height: 24, alignment: .top)
+                    .accessibilityHidden(true)
+            }
+        }
+        .fixedSize(horizontal: true, vertical: false)
+    }
+}
+
+/// Typing and filter drafts are observed here, independently of the work area.
+private struct WorkspaceSearchPanel: View {
+    @ObservedObject var workspace: Workspace
+    @ObservedObject var draft: WorkspaceSearchDraft
+    let palette: DeskPalette
+    let availableHeight: CGFloat
+    @StateObject private var focus = SearchFocus()
+
+    var body: some View {
         let shape = RoundedRectangle(cornerRadius: 20)
         let history = workspace.searchHistory.prefix(5)
         return VStack(alignment: .leading, spacing: 10) {
             Text("搜索 NodeSeek").font(.system(size: 17, weight: .semibold))
             HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass").foregroundStyle(.secondary).accessibilityHidden(true)
-                WorkspaceSearchField(text: $workspace.searchText, onSubmit: workspace.search,
-                                     onCancel: dismissSearch, onFocusChange: { searchAnchors.fieldFocused = $0 })
+                WorkspaceSearchField(text: $draft.text, onSubmit: workspace.search,
+                                     onCancel: dismissSearch, onFocusChange: { focus.fieldFocused = $0 })
                     .frame(height: 20)
-                if !workspace.searchText.isEmpty {
-                    Button { workspace.searchText = "" } label: {
+                if !draft.text.isEmpty {
+                    Button { draft.text = "" } label: {
                         Image(systemName: "xmark.circle.fill")
                             .foregroundStyle(.secondary)
                             .frame(width: 24, height: 28).contentShape(Rectangle())
@@ -1232,14 +1229,15 @@ struct WorkspaceView: View {
             .padding(.horizontal, 10).frame(height: 36)
             .background(palette.surface, in: RoundedRectangle(cornerRadius: 8))
             .overlay {
-                RoundedRectangle(cornerRadius: 8).strokeBorder(searchAnchors.fieldFocused ? palette.accent : palette.line)
+                RoundedRectangle(cornerRadius: 8).strokeBorder(focus.fieldFocused ? palette.accent : palette.line)
                     .allowsHitTesting(false)
             }
-            Picker("结果类型", selection: $workspace.searchKind) {
-                ForEach(Workspace.SearchKind.allCases) { Text($0.title).tag($0) }
+            DeskGlassPicker(values: Workspace.SearchKind.allCases, selection: $draft.kind,
+                            tint: palette.accent, solid: palette.selection, compact: true) { kind, _ in
+                Text(kind.title).font(.system(size: 12, weight: .semibold))
             }
-            .pickerStyle(.segmented).labelsHidden()
-            if workspace.searchKind != .people { searchScopePicker }
+            .accessibilityLabel("结果类型")
+            if draft.kind != .people { searchScopePicker }
             if !history.isEmpty {
                 HStack {
                     Text("最近搜索").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
@@ -1270,21 +1268,19 @@ struct WorkspaceView: View {
                     }
                 }
                 .frame(height: min(CGFloat(history.count * 26 - 3),
-                                   max(24, availableHeight - (workspace.searchKind == .people ? 220 : 340))))
+                                   max(24, availableHeight - (draft.kind == .people ? 220 : 340))))
             }
             HStack {
-                Text(workspace.searchKind == .people ? "按用户名查找论坛成员。" : "版块筛选只作用于帖子。")
+                Text(draft.kind == .people ? "按用户名查找论坛成员。" : "版块筛选只作用于帖子。")
                     .font(.caption).foregroundStyle(.secondary)
                 Spacer()
                 Button("取消", action: dismissSearch).keyboardShortcut(.cancelAction)
                 Button("搜索", action: workspace.search).keyboardShortcut(.defaultAction)
-                    .disabled(workspace.searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(draft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
         }
         .padding(20).frame(width: 560)
-        .background(palette.chrome.opacity(0.48), in: shape)
         .deskGlass(in: shape, solid: palette.chrome)
-        .shadow(color: .black.opacity(palette.dark ? 0.35 : 0.18), radius: 20, y: 10)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("搜索或打开帖子")
         .onExitCommand(perform: dismissSearch)
@@ -1295,18 +1291,18 @@ struct WorkspaceView: View {
             HStack {
                 Text("搜索版块").font(.subheadline.weight(.semibold))
                 Spacer()
-                Text(workspace.searchScope.isEmpty ? "搜索所有版块" : "已选 \(workspace.searchScope.count) 个版块")
+                Text(draft.scope.isEmpty ? "搜索所有版块" : "已选 \(draft.scope.count) 个版块")
                     .font(.caption).foregroundStyle(.secondary)
             }
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 7), count: 5), spacing: 6) {
-                searchScopeChip("全部版块", selected: workspace.searchScope.isEmpty) {
-                    workspace.searchScope = []
+                searchScopeChip("全部版块", selected: draft.scope.isEmpty) {
+                    draft.scope = []
                 }
                 ForEach(Board.sections) { board in
-                    let selected = workspace.searchScope.contains(board.id)
+                    let selected = draft.scope.contains(board.id)
                     searchScopeChip(board.title, selected: selected) {
-                        if selected { workspace.searchScope.remove(board.id) }
-                        else { workspace.searchScope.insert(board.id) }
+                        if selected { draft.scope.remove(board.id) }
+                        else { draft.scope.insert(board.id) }
                     }
                 }
             }
@@ -1331,102 +1327,105 @@ struct WorkspaceView: View {
         .accessibilityAddTraits(selected ? .isSelected : [])
     }
 
-    private func dismissSearch() {
-        workspace.showingSearch = false
+    private func dismissSearch() { workspace.showingSearch = false }
+
+    @MainActor private final class SearchFocus: ObservableObject {
+        @Published var fieldFocused = false
+    }
+}
+
+/// Pointer updates invalidate only the split container. The already-built feed
+/// and reader values keep their identity while SwiftUI lays out the new widths.
+private struct ForumPaneColumns<Feed: View, Reader: View>: View {
+    let width: CGFloat
+    let reading: Bool
+    let compact: Bool
+    let listVisible: Bool
+    let palette: DeskPalette
+    let feed: Feed
+    let reader: Reader
+    @AppStorage("workspace.topicColumnWidth") private var storedListWidth = 340.0
+    @StateObject private var drag = ColumnDrag()
+
+    init(width: CGFloat, reading: Bool, compact: Bool, listVisible: Bool, palette: DeskPalette,
+         @ViewBuilder feed: () -> Feed, @ViewBuilder reader: () -> Reader) {
+        self.width = width
+        self.reading = reading
+        self.compact = compact
+        self.listVisible = listVisible
+        self.palette = palette
+        self.feed = feed()
+        self.reader = reader()
     }
 
-    private func showNotifications() {
-        workspace.showNotifications()
-        Task { await forumSession.refreshUnread() }
+    var body: some View {
+        let divider = DeskSidebarSizing.divider
+        let range: ClosedRange<CGFloat> = 240...max(240, min(620, width - 412 - divider))
+        let hasColumn = reading && !compact
+        let base = clamp(CGFloat(storedListWidth), in: range)
+        let listWidth = hasColumn ? clamp(base + drag.offset, in: range) : width
+        let visibleWidth = listVisible ? listWidth + (hasColumn ? divider : 0) : 0
+        HStack(spacing: 0) {
+            HStack(spacing: 0) {
+                feed.frame(width: listWidth)
+                if hasColumn {
+                    resizeDivider(width: listWidth, base: base, range: range)
+                }
+            }
+            .frame(width: visibleWidth, alignment: .trailing)
+            .mask { Rectangle().ignoresSafeArea(.container, edges: .top) }
+            .disabled(!listVisible)
+            .accessibilityHidden(!listVisible)
+            .allowsHitTesting(listVisible)
+            if reading { reader }
+        }
+        .frame(width: width, alignment: .leading)
     }
 
-    private var unreadBadge: some View {
-        let count = forumSession.unread.total
-        return ZStack {
-            if count > 0 {
-                Text(count > 99 ? "99+" : String(count))
-                    .font(.system(size: 9, weight: .bold)).monospacedDigit()
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 4).frame(minWidth: 15, minHeight: 15)
-                    .background(palette.unread, in: Capsule())
-                    .contentTransition(reduceMotion ? .identity : .numericText(value: Double(count)))
-                    .transition(reduceMotion ? .identity : .scale(scale: 0.7).combined(with: .opacity))
+    private func resizeDivider(width: CGFloat, base: CGFloat, range: ClosedRange<CGFloat>) -> some View {
+        ZStack {
+            Rectangle().fill(palette.list)
+            Rectangle().fill(palette.line).frame(width: 1)
+            Capsule().fill(palette.accent.opacity(drag.offset != 0 ? 0.92 : 0.37))
+                .frame(width: 3, height: drag.offset != 0 ? 34 : 24)
+        }
+        .frame(width: DeskSidebarSizing.divider)
+        .overlay {
+            DeskResizeHandle(change: { delta in
+                let constrained = clamp(base + delta, in: range) - base
+                if drag.offset != constrained { drag.offset = constrained }
+            }, finish: { delta in
+                withTransaction(Transaction(animation: nil)) {
+                    drag.offset = 0
+                    if delta != 0 {
+                        let value = Double(clamp(base + delta, in: range))
+                        if storedListWidth != value { storedListWidth = value }
+                    }
+                }
+            }, reset: { storedListWidth = 340 })
+        }
+        .zIndex(1)
+        .help("拖动调整帖子列表宽度，双击恢复默认")
+        .accessibilityElement()
+        .accessibilityLabel("帖子列表宽度")
+        .accessibilityValue("\(Int(width)) 点")
+        .accessibilityAdjustableAction { direction in
+            switch direction {
+            case .increment: storedListWidth = Double(clamp(base + 24, in: range))
+            case .decrement: storedListWidth = Double(clamp(base - 24, in: range))
+            @unknown default: break
             }
         }
-        .offset(x: 5, y: -3).allowsHitTesting(false).accessibilityHidden(true)
-        .animation(reduceMotion ? nil : DeskMotion.selection, value: count)
     }
 
-    private func toolButton(_ title: String, icon: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Label {
-                Text(title)
-            } icon: {
-                DeskIcon(icon, size: 14).font(.system(size: 14, weight: .medium)).frame(width: 27, height: 27)
-            }
-            .labelStyle(.iconOnly)
-        }
-            .buttonStyle(DeskButtonStyle(compresses: true))
-            .foregroundStyle(.secondary)
-            .help(title).accessibilityLabel(title)
+    private func clamp(_ value: CGFloat, in bounds: ClosedRange<CGFloat>) -> CGFloat {
+        min(bounds.upperBound, max(bounds.lowerBound, value))
     }
 
-}
-
-@MainActor
-private final class WorkspaceSearchAnchors: ObservableObject {
-    @Published var hovering = false
-    @Published var fieldFocused = false
-    weak var button: NSView?
-    weak var viewport: NSView?
-
-    var buttonFrame: CGRect? {
-        guard let button, let viewport, let window = button.window, window === viewport.window,
-              !button.bounds.isEmpty else { return nil }
-        // Native toolbar items are hosted separately from the SwiftUI window content.
-        return viewport.convert(button.convert(button.bounds, to: nil), from: nil)
-    }
-}
-
-private struct WorkspaceSearchAnchor: NSViewRepresentable {
-    let register: (NSView) -> Void
-
-    func makeNSView(context: Context) -> NSView {
-        let view = AnchorView()
-        register(view)
-        return view
+    @MainActor private final class ColumnDrag: ObservableObject {
+        @Published var offset: CGFloat = 0
     }
 
-    func updateNSView(_ view: NSView, context: Context) {
-        register(view)
-    }
-
-    private final class AnchorView: NSView {
-        override var isFlipped: Bool { true }
-        override func hitTest(_ point: NSPoint) -> NSView? { nil }
-    }
-}
-
-private struct WorkspaceSearchExpansion: Transition {
-    let source: CGRect
-    let center: CGPoint
-
-    func body(content: Content, phase: TransitionPhase) -> some View {
-        content.visualEffect { effect, geometry in
-            effect
-                .scaleEffect(x: phase.isIdentity ? 1 : source.width / max(1, geometry.size.width),
-                             y: phase.isIdentity ? 1 : source.height / max(1, geometry.size.height))
-                .offset(x: phase.isIdentity ? 0 : source.midX - center.x,
-                        y: phase.isIdentity ? 0 : source.midY - center.y)
-                .opacity(phase.isIdentity ? 1 : 0.25)
-        }
-    }
-}
-
-@MainActor
-private final class PaneDragState: ObservableObject {
-    @Published var sidebar: CGFloat = 0
-    @Published var list: CGFloat = 0
 }
 
 

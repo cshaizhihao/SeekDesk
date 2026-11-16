@@ -16,22 +16,41 @@ struct MarkdownPreview: View {
                     MarkdownPreviewBlocks(blocks: snapshot.blocks, palette: palette).equatable()
                 }
             }
-            .font(.system(size: 13)).frame(maxWidth: .infinity, alignment: .leading).padding(9)
+            .font(.system(size: 15)).lineSpacing(4)
+            .frame(maxWidth: .infinity, alignment: .leading).padding(14)
         }
+        .accessibilityElement(children: .contain)
         .accessibilityLabel("Markdown 预览")
         .environmentObject(imageSizing)
         .environment(\.markdownImageResized, onResize)
         .environment(\.openURL, OpenURLAction { _ in .discarded })
         .task(id: text) {
+            let revision = snapshot.beginRequest()
             if !snapshot.blocks.isEmpty {
                 do { try await Task.sleep(for: .milliseconds(105)) } catch { return }
             }
-            snapshot.blocks = MarkdownPreviewDocument.blocks(text)
+            guard !Task.isCancelled, snapshot.isCurrent(revision) else { return }
+            do {
+                let blocks = try await MarkdownPreviewParsing.blocks(for: text)
+                guard !Task.isCancelled, snapshot.isCurrent(revision) else { return }
+                if snapshot.blocks != blocks { snapshot.blocks = blocks }
+            } catch {
+                // Parsing only throws on cancellation; keep the last completed preview.
+                return
+            }
         }
     }
 
     private final class PreviewSnapshot: ObservableObject {
         @Published var blocks: [MarkdownPreviewDocument.Block] = []
+        private var requestRevision = 0
+
+        func beginRequest() -> Int {
+            requestRevision += 1
+            return requestRevision
+        }
+
+        func isCurrent(_ revision: Int) -> Bool { revision == requestRevision }
     }
 }
 
@@ -48,7 +67,8 @@ struct MarkdownPreviewBlocks: View, Equatable {
                     line(source, kind: kind)
                 case .code(let source):
                     ScrollView(.horizontal) {
-                        Text(source).font(.system(size: 12, design: .monospaced)).fixedSize(horizontal: true, vertical: false)
+                        Text(source).font(.system(size: showsImageControls ? 13 : 12, design: .monospaced))
+                            .fixedSize(horizontal: true, vertical: false)
                             .padding(9).frame(maxWidth: .infinity, alignment: .leading)
                     }
                     .background(palette.list, in: RoundedRectangle(cornerRadius: 6))
@@ -88,7 +108,7 @@ struct MarkdownPreviewBlocks: View, Equatable {
                     switch part {
                     case .text(let value):
                         Text(formatted(value))
-                            .font(.system(size: heading == 0 ? 13 : CGFloat(max(14, 22 - heading * 2)),
+                            .font(.system(size: heading == 0 ? (showsImageControls ? 15 : 13) : CGFloat(max(14, 22 - heading * 2)),
                                           weight: heading == 0 ? .regular : .semibold))
                             .foregroundStyle(quote ? .secondary : .primary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -105,7 +125,7 @@ struct MarkdownPreviewBlocks: View, Equatable {
     private func cells(_ cells: [String], header: Bool) -> some View {
         GridRow {
             ForEach(Array(cells.enumerated()), id: \.offset) { _, value in
-                Text(formatted(value)).fontWeight(header ? .semibold : .regular)
+                tableText(value, header: header)
                     .padding(.horizontal, 9).padding(.vertical, 6)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(header ? palette.list : .clear)
@@ -115,18 +135,37 @@ struct MarkdownPreviewBlocks: View, Equatable {
         }
     }
 
+    @ViewBuilder private func tableText(_ value: String, header: Bool) -> some View {
+        if showsImageControls {
+            Text(formatted(value)).font(.system(size: 14, weight: header ? .semibold : .regular))
+        } else {
+            Text(formatted(value)).fontWeight(header ? .semibold : .regular)
+        }
+    }
+
     private func formatted(_ value: String) -> AttributedString {
         if !showsImageControls { return ForumMarkdownLink.format(value) }
-        let options = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
-        return (try? AttributedString(markdown: value, options: options)) ?? AttributedString(value)
+        return DeskMarkdownText.inline(value)
     }
 
 }
 
 enum ForumMarkdownLink {
     private static let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
+    private final class Value: NSObject {
+        let text: AttributedString
+        init(_ text: AttributedString) { self.text = text }
+    }
+    private static let cache: NSCache<NSString, Value> = {
+        let cache = NSCache<NSString, Value>()
+        cache.countLimit = 256
+        cache.totalCostLimit = 1024 * 1024
+        return cache
+    }()
 
     static func format(_ source: String) -> AttributedString {
+        let key = source as NSString
+        if let saved = cache.object(forKey: key) { return saved.text }
         let options = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
         var text = (try? AttributedString(markdown: source, options: options, baseURL: Forum.home)) ?? AttributedString(source)
         let plain = String(text.characters)
@@ -139,8 +178,15 @@ enum ForumMarkdownLink {
         }
         let unsafe = text.runs.compactMap { run in run.link.map { canOpen($0) ? nil : run.range } ?? nil }
         for range in unsafe { text[range].link = nil }
+        // A repeated author signature should not rerun Markdown and link detection on every
+        // floor update. Keep the sanitized result only, bounded and entirely in memory.
+        if source.utf8.count <= 16_384 {
+            cache.setObject(Value(text), forKey: key, cost: max(64, source.utf8.count * 8))
+        }
         return text
     }
+
+    static func removeAll() { cache.removeAllObjects() }
 
     static func canOpen(_ url: URL) -> Bool {
         ["https", "http"].contains(url.scheme?.lowercased() ?? "") && url.host != nil && url.user == nil && url.password == nil
@@ -149,42 +195,128 @@ enum ForumMarkdownLink {
 
 @MainActor
 final class DraftImageSizing: ObservableObject {
+    typealias Authorization = @MainActor () -> Bool
+
+    struct Requests {
+        var readKey: @MainActor () async throws -> String? = { try await NodeImageKey.readAsync() }
+        var resize: @MainActor (URL, MarkdownImageScale) async throws -> NodeImageUpload.Picture = { url, size in
+            try await NodeImageUpload.resizedPicture(from: url, scale: size)
+        }
+        var upload: @MainActor (NodeImageUpload.Picture, String) async throws -> URL = { picture, key in
+            try await NodeImageUpload.upload(picture, key: key)
+        }
+    }
+
     @Published private(set) var sizes: [URL: MarkdownImageScale] = [:]
     private var uploaded: [URL: (size: MarkdownImageScale, link: URL)] = [:]
+    private let requests: Requests
+    private var mutation: UInt64 = 0
+    private var preparationID: UUID?
+    private var credentialRead: (id: UUID, task: Task<String?, Error>)?
     var didChange: (() -> Void)?
 
+    init(requests: Requests = Requests()) { self.requests = requests }
+
     func set(_ ratio: Double, previewWidth: Double, for url: URL) {
-        sizes[url] = ratio < 1 ? MarkdownImageScale(ratio: ratio, previewWidth: previewWidth) : nil
+        let selection = ratio < 1 ? MarkdownImageScale(ratio: ratio, previewWidth: previewWidth) : nil
+        guard sizes[url] != selection else { return }
+        mutation &+= 1
+        cancelPendingCredentialRead()
+        sizes[url] = selection
         didChange?()
     }
 
     func reset() {
+        mutation &+= 1
+        cancelPendingCredentialRead()
         sizes.removeAll()
         uploaded.removeAll()
         didChange?()
     }
 
-    func restore(_ saved: [URL: MarkdownImageScale]) { sizes = saved }
+    func restore(_ saved: [URL: MarkdownImageScale]) {
+        mutation &+= 1
+        cancelPendingCredentialRead()
+        sizes = saved
+        uploaded.removeAll()
+    }
 
-    func prepare(_ markdown: String) async throws -> String {
+    /// Retiring a draft must also remove its queued credential work, before
+    /// that work can enter the Keychain backend and present an obsolete prompt.
+    func cancelPendingCredentialRead() {
+        credentialRead?.task.cancel()
+    }
+
+    private func readKey() async throws -> String? {
+        try Task.checkCancellation()
+        let id = UUID(), read = requests.readKey
+        let task = Task { @MainActor in
+            try Task.checkCancellation()
+            return try await read()
+        }
+        credentialRead = (id, task)
+        defer { if credentialRead?.id == id { credentialRead = nil } }
+        let result = await withTaskCancellationHandler {
+            await task.result
+        } onCancel: {
+            task.cancel()
+        }
+        // Injected providers, like synchronous Security IPC, may finish even
+        // after cancellation. Their results still belong to the retired read.
+        guard !task.isCancelled else { throw CancellationError() }
+        try Task.checkCancellation()
+        return try result.get()
+    }
+
+    func prepare(_ markdown: String, authorized: @escaping Authorization) async throws -> String {
+        try Task.checkCancellation()
+        guard authorized(), preparationID == nil else { throw CancellationError() }
+        let operation = UUID(), revision = mutation
+        preparationID = operation
+        defer { if preparationID == operation { preparationID = nil } }
+
+        func check() throws {
+            try Task.checkCancellation()
+            guard authorized(), mutation == revision, preparationID == operation else { throw CancellationError() }
+        }
+
         let selections = sizes
         let references = MarkdownPreviewDocument.imageReferences(markdown, selected: Set(selections.keys))
-        guard !references.isEmpty else { return markdown }
-        var replacements: [URL: URL] = [:]
-        for reference in references {
-            let url = reference.url
-            guard replacements[url] == nil, let size = selections[url] else { continue }
-            if let previous = uploaded[url], previous.size == size {
-                replacements[url] = previous.link
-                continue
+        do {
+            // Even an empty document or an entirely cached preparation belongs
+            // to an authorized, live draft and must not bypass cancellation.
+            try check()
+            guard !references.isEmpty else { return markdown }
+            var replacements: [URL: URL] = [:]
+            for reference in references {
+                try check()
+                let url = reference.url
+                guard replacements[url] == nil, let size = selections[url] else { continue }
+                if let previous = uploaded[url], previous.size == size {
+                    replacements[url] = previous.link
+                    continue
+                }
+                let key = try await readKey()
+                try check()
+                guard let key, !key.isEmpty else { throw NodeImageError.missingKey }
+                let picture = try await requests.resize(url, size)
+                try check()
+                let link = try await requests.upload(picture, key)
+                try check()
+                // A reset/restore or a different size selected while awaiting
+                // must never repopulate the cache with this stale completion.
+                uploaded[url] = (size, link)
+                replacements[url] = link
             }
-            guard let key = try NodeImageKey.read(), !key.isEmpty else { throw NodeImageError.missingKey }
-            let picture = try await NodeImageUpload.resizedPicture(from: url, scale: size)
-            let link = try await NodeImageUpload.upload(picture, key: key)
-            uploaded[url] = (size, link)
-            replacements[url] = link
+            let prepared = MarkdownPreviewDocument.replacingImages(markdown, references: references, with: replacements)
+            try check()
+            return prepared
+        } catch {
+            // Authorization/cancellation wins over a late transport error.
+            // Completed, authorized images remain cached for a valid retry.
+            try check()
+            throw error
         }
-        return MarkdownPreviewDocument.replacingImages(markdown, references: references, with: replacements)
     }
 }
 
@@ -226,7 +358,7 @@ private struct MarkdownPreviewImage: View {
             }
             .font(.caption).foregroundStyle(.secondary).controlSize(.small)
             .padding(.horizontal, 8).frame(height: 25)
-            .background(palette.list, in: RoundedRectangle(cornerRadius: 6))
+            .deskGlass(in: RoundedRectangle(cornerRadius: 6), solid: palette.list)
             .help("小于 100% 时，发布或发送前会将缩小后的图片上传到 NodeImage。")
             ForumImageView(url: url, label: label, sticker: false, previewSize: sizing.sizes[url])
         }
@@ -272,11 +404,32 @@ struct MarkdownDraftStickers: View {
         }
         .task(id: text) {
             do { try await Task.sleep(for: .milliseconds(105)) } catch { return }
-            snapshot.items = MarkdownPreviewDocument.stickerImages(text)
+            let items = MarkdownDraftStickerScan.items(in: text)
+            if snapshot.items != items { snapshot.items = items }
         }
     }
 
     private final class Snapshot: ObservableObject {
         @Published var items: [MarkdownPreviewDocument.Inline] = []
+    }
+}
+
+enum MarkdownDraftStickerScan {
+    private static let token = try! NSRegularExpression(pattern: #":((?:ac|yct|xhj|emoji)[0-9]+):"#)
+
+    static func items(in text: String) -> [MarkdownPreviewDocument.Inline] {
+        // Keep every image opener as a candidate. The full parser determines
+        // sticker labels and excludes ordinary images, code spans and escapes.
+        var candidate = text.contains("![")
+        if !candidate {
+            let source = text as NSString
+            token.enumerateMatches(in: text, range: NSRange(location: 0, length: source.length)) { match, _, stop in
+                if let match, ForumStickers.byCode[source.substring(with: match.range(at: 1))] != nil {
+                    candidate = true
+                    stop.pointee = true
+                }
+            }
+        }
+        return candidate ? MarkdownPreviewDocument.stickerImages(text) : []
     }
 }

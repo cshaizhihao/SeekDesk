@@ -94,13 +94,13 @@ actor RulingClient {
 
     private var cache: [String: Cached] = [:]
     private var nextRequest = Date.distantPast
-    private let session: URLSession = {
+    private let session: DeskProxySession = {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.httpShouldSetCookies = false
         configuration.httpCookieStorage = nil
         configuration.urlCredentialStorage = nil
         configuration.timeoutIntervalForResource = 15
-        return URLSession(configuration: configuration)
+        return DeskProxyNetwork.shared.makeSession(configuration: configuration)
     }()
 
     static func request(for name: String) -> URLRequest? {

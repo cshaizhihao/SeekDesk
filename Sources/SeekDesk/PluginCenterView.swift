@@ -14,27 +14,25 @@ struct PluginCenterView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 13) {
-                if selection.item != nil {
-                    Button { selection.item = nil } label: {
-                        DeskLabel("返回扩展中心", systemImage: "chevron.left")
-                    }.buttonStyle(.bordered)
+            PluginGlassGroup {
+                HStack(spacing: 13) {
+                    if selection.item != nil {
+                        navigationButton("返回扩展中心") { selection.item = nil }
+                    }
+                    Text(selection.item == nil ? "扩展中心" : "扩展详情")
+                        .font(.system(size: selection.item == nil ? 23 : 16, weight: .semibold)).accessibilityAddTraits(.isHeader)
+                    Spacer()
+                    navigationButton(returnTitle, action: returnToForum)
                 }
-                Text(selection.item?.title ?? "扩展中心")
-                    .font(.system(size: 23, weight: .bold)).accessibilityAddTraits(.isHeader)
-                Spacer()
-                Button(action: returnToForum) { DeskLabel(returnTitle, systemImage: "chevron.left") }
-                    .buttonStyle(.bordered)
+                .padding(.horizontal, 24).padding(.top, 20).padding(.bottom, 16)
             }
-            .padding(.horizontal, 20).padding(.vertical, 13).background(palette.chrome)
-            Rectangle().fill(palette.line).frame(height: 1)
             if let item = selection.item {
-                detail(item)
+                detail(item).id(item).modifier(DeskArrival())
             } else {
-                catalog
+                catalog.modifier(DeskArrival())
             }
         }
-        .background(palette.reader)
+        .background(palette.readerWash)
     }
 
     private var catalog: some View {
@@ -42,14 +40,15 @@ struct PluginCenterView: View {
         let available = DeskExtension.allCases.filter { !extensions.installed.contains($0) }
         return VStack(spacing: 0) {
             HStack {
-                Picker("扩展分类", selection: $selection.catalog) {
-                    Text("已安装 \(installed.count)").tag(Catalog.installed)
-                    Text("全部扩展 \(DeskExtension.allCases.count)").tag(Catalog.all)
+                DeskGlassPicker(values: [Catalog.installed, .all], selection: $selection.catalog,
+                                tint: palette.accent, solid: palette.selection) { category, selected in
+                    Text(category == .installed ? "已安装 \(installed.count)" : "全部扩展 \(DeskExtension.allCases.count)")
+                        .font(.system(size: 13, weight: .semibold))
                 }
-                .pickerStyle(.segmented).labelsHidden().frame(width: 235)
+                .accessibilityIdentifier("extension-category")
                 Spacer()
             }
-            .padding(.horizontal, 20).padding(.vertical, 12)
+            .padding(.horizontal, 24).padding(.top, 2).padding(.bottom, 20)
             if selection.catalog == .installed && installed.isEmpty {
                 ContentUnavailableView {
                     DeskLabel("还没有已安装的扩展", systemImage: "puzzlepiece.extension", size: 32)
@@ -59,65 +58,47 @@ struct PluginCenterView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 19) {
-                        if selection.catalog == .all && !available.isEmpty {
-                            catalogSection("未安装", items: available)
-                        }
-                        if !installed.isEmpty {
-                            catalogSection("已安装", items: installed)
+                    PluginGlassGroup {
+                        VStack(alignment: .leading, spacing: 24) {
+                            if selection.catalog == .all && !available.isEmpty {
+                                catalogSection("未安装", items: available)
+                            }
+                            if !installed.isEmpty {
+                                catalogSection("已安装", items: installed)
+                            }
                         }
                     }
                     .frame(maxWidth: 1000, alignment: .leading)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 20).padding(.top, 3).padding(.bottom, 22)
+                    .padding(.horizontal, 24).padding(.top, 4).padding(.bottom, 28)
                 }
             }
         }
     }
 
     private func catalogSection(_ title: String, items: [DeskExtension]) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 12) {
             Text(title).font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(.secondary).accessibilityAddTraits(.isHeader)
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 208, maximum: 258), spacing: 12)], spacing: 12) {
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 230, maximum: 310), spacing: 16)], spacing: 16) {
                 ForEach(items) { item in card(item) }
             }
         }
     }
 
     private func card(_ item: DeskExtension) -> some View {
-        let installed = extensions.installed.contains(item)
-        let active = extensions.active(item)
-        let status = installed ? (active ? "已启用" : "已停用") : "未安装"
-        let ink = active ? palette.categoryInk("review") : Color.secondary
-        return Button { selection.item = item } label: {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    icon(item)
-                    Spacer()
-                    DeskLabel(status, systemImage: active ? "checkmark.circle.fill" : installed ? "pause.circle" : "arrow.down.circle")
-                        .font(.caption2.weight(.semibold)).foregroundStyle(ink)
-                        .padding(.horizontal, 6).padding(.vertical, 3)
-                        .background(active ? ink.opacity(0.12) : palette.surface, in: Capsule())
-                }
-                Text(item.title).font(.system(size: 14, weight: .semibold)).lineLimit(1)
-                Text(cardSubtitle(item))
-                    .font(.caption).foregroundStyle(.secondary).lineLimit(2)
-                    .fixedSize(horizontal: false, vertical: true)
-                Spacer(minLength: 0)
-            }
-            .padding(12).frame(maxWidth: .infinity, alignment: .leading).frame(height: 126)
-            .background(installed ? palette.list : palette.reader, in: RoundedRectangle(cornerRadius: 9))
-            .overlay {
-                RoundedRectangle(cornerRadius: 9)
-                    .strokeBorder(installed ? palette.line : palette.line.opacity(0.85),
-                                  style: StrokeStyle(lineWidth: 1, dash: installed ? [] : [4, 3]))
-                    .allowsHitTesting(false)
-            }
+        PluginCatalogCard(title: item.title, subtitle: cardSubtitle(item), symbol: item.icon,
+                          installed: extensions.installed.contains(item), active: extensions.active(item), palette: palette) {
+            selection.item = item
         }
-        .buttonStyle(DeskButtonStyle())
-        .accessibilityLabel(item.title)
-        .accessibilityValue(installed ? "已安装，\(status)" : status)
+    }
+
+    private func navigationButton(_ title: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            DeskLabel(title, systemImage: "chevron.left").font(.system(size: 12, weight: .medium))
+                .padding(.horizontal, 8).frame(height: 30)
+        }
+        .deskGlassButtonStyle()
     }
 
     private func cardSubtitle(_ item: DeskExtension) -> String {
@@ -129,66 +110,201 @@ struct PluginCenterView: View {
     }
 
     private func detail(_ item: DeskExtension) -> some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                HStack(spacing: 12) {
-                    icon(item)
-                    VStack(alignment: .leading, spacing: 5) {
-                        Text(item.title).font(.title2.weight(.semibold))
-                        Text(item.description).font(.callout).foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    if extensions.installed.contains(item) {
-                        Toggle("启用", isOn: Binding(get: { extensions.active(item) }, set: { extensions.setEnabled(item, $0) }))
-                            .toggleStyle(.switch)
-                    } else {
-                        Button("安装扩展") { extensions.install(item) }.buttonStyle(.borderedProminent)
+        GeometryReader { geometry in
+            ScrollView {
+                Group {
+                    VStack(alignment: .leading, spacing: 20) {
+                        detailIdentity(item)
+                        if item == .proxy && extensions.installed.contains(item) {
+                            DeskProxySettingsView(available: extensions.active(.proxy), palette: palette)
+                        } else {
+                            let wide = geometry.size.width >= 850 && extensions.installed.contains(item)
+                            let layout = wide ? AnyLayout(HStackLayout(alignment: .top, spacing: 20)) :
+                                AnyLayout(VStackLayout(alignment: .leading, spacing: 20))
+                            layout {
+                                detailSettings(item).frame(maxWidth: .infinity)
+                                if extensions.installed.contains(item) {
+                                    detailGuide(item).frame(width: wide ? 280 : nil)
+                                }
+                            }
+                        }
+                        if extensions.installed.contains(item) { removalRow(item) }
                     }
                 }
-                if item == .hot {
-                    Link("原作者 @小号", destination: URL(string: "https://www.nodeseek.com/space/10539")!)
-                        .font(.callout)
+                .frame(maxWidth: 960, alignment: .leading)
+                .padding(.horizontal, 24).padding(.top, 8).padding(.bottom, 28)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .onAppear { if item == .keywords { extensions.acknowledgeHits() } }
+    }
+
+    private func detailIdentity(_ item: DeskExtension) -> some View {
+        let installed = extensions.installed.contains(item)
+        let active = extensions.active(item)
+        return VStack(alignment: .leading, spacing: 22) {
+            HStack(alignment: .top, spacing: 18) {
+                DeskIcon(item.icon, size: 30).font(.system(size: 30, weight: .medium))
+                    .foregroundStyle(palette.accent).frame(width: 68, height: 68)
+                    .background(palette.accent.opacity(0.10), in: RoundedRectangle(cornerRadius: 20))
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(item.title).font(.system(size: 24, weight: .bold))
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text(item.description).font(.system(size: 13)).foregroundStyle(.secondary)
+                        .lineSpacing(3).fixedSize(horizontal: false, vertical: true)
                 }
-                if item == .rulings {
-                    VStack(alignment: .leading, spacing: 7) {
-                        Link("原脚本 · @slugger（sluggerbox）", destination: URL(string: "https://greasyfork.org/scripts/567915")!)
-                        Link("NS Seek 后端 · @slugger", destination: URL(string: "https://github.com/theslugger/ns-seek")!)
-                        Link("北京时间修正 · @sss1231", destination: URL(string: "https://www.nodeseek.com/post-870735-1")!)
-                    }
-                    .font(.callout)
-                }
-                if extensions.installed.contains(item) {
-                    Divider()
-                    controls(item)
-                    if item == .hot && extensions.active(item) {
-                        Button("打开热榜", action: showHot).buttonStyle(.borderedProminent)
-                    }
-                    Divider()
-                    Button("移除扩展", role: .destructive) { extensions.remove(item) }
+                Spacer(minLength: 0)
+            }
+            HStack(spacing: 12) {
+                Label(installed ? (active ? "已启用" : "已停用") : "尚未安装",
+                      systemImage: active ? "checkmark.circle.fill" : installed ? "pause.circle" : "arrow.down.circle")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(active ? palette.categoryInk("review") : .secondary)
+                Spacer()
+                if installed {
+                    Toggle("启用扩展", isOn: Binding(get: { extensions.active(item) }, set: { extensions.setEnabled(item, $0) }))
+                        .toggleStyle(.switch).tint(palette.accent).font(.system(size: 12, weight: .medium))
+                } else {
+                    Button { extensions.install(item) } label: { Label("安装扩展", systemImage: "plus") }
+                        .buttonStyle(.borderedProminent).controlSize(.large).tint(palette.accent)
                 }
             }
-            .padding(18).frame(maxWidth: 700, alignment: .leading)
-            .background(palette.list, in: RoundedRectangle(cornerRadius: 9))
-            .padding(20).frame(maxWidth: .infinity)
         }
-        .onAppear {
-            if item == .keywords { extensions.acknowledgeHits() }
+        .padding(26).frame(maxWidth: .infinity, alignment: .leading)
+        .deskGlass(in: RoundedRectangle(cornerRadius: 24), solid: palette.list)
+    }
+
+    private func detailSettings(_ item: DeskExtension) -> some View {
+        VStack(alignment: .leading, spacing: 20) {
+            if extensions.installed.contains(item) {
+                PluginDetailSection(settingsTitle(item), symbol: settingsSymbol(item), palette: palette) {
+                    controls(item)
+                }
+            } else {
+                PluginDetailSection("功能预览", symbol: "sparkles", palette: palette) {
+                    guideRows(item)
+                    Label("安装后可在这里管理扩展。", systemImage: "plus.circle")
+                        .font(.system(size: 12)).foregroundStyle(.secondary)
+                }
+            }
+            if item == .hot || item == .rulings {
+                PluginDetailSection("来源与致谢", symbol: "heart", palette: palette) {
+                    if item == .hot {
+                        sourceLink("原作者 @小号", subtitle: "NodeSeek 社区", url: "https://www.nodeseek.com/space/10539")
+                        Divider()
+                        sourceLink("原热榜项目", subtitle: "Greasy Fork", url: "https://greasyfork.org/scripts/560065")
+                    } else {
+                        sourceLink("原脚本 · @slugger", subtitle: "sluggerbox · Greasy Fork", url: "https://greasyfork.org/scripts/567915")
+                        Divider()
+                        sourceLink("NS Seek 后端", subtitle: "@slugger · GitHub", url: "https://github.com/theslugger/ns-seek")
+                        Divider()
+                        sourceLink("北京时间修正", subtitle: "@sss1231 · NodeSeek", url: "https://www.nodeseek.com/post-870735-1")
+                    }
+                }
+            }
         }
     }
 
-    private func icon(_ item: DeskExtension) -> some View {
-        DeskIcon(item.icon, size: 17).font(.system(size: 17, weight: .medium)).foregroundStyle(palette.accent)
-            .frame(width: 36, height: 36).background(palette.selection, in: RoundedRectangle(cornerRadius: 8))
+    private func detailGuide(_ item: DeskExtension) -> some View {
+        PluginDetailSection("使用方式", symbol: "lightbulb", palette: palette) {
+            guideRows(item)
+        }
+    }
+
+    @ViewBuilder private func guideRows(_ item: DeskExtension) -> some View {
+        switch item {
+        case .hot:
+            guide("sidebar.left", "侧栏随时查看", "展开侧栏热榜，直接打开感兴趣的帖子。")
+            guide("clock", "切换时间范围", "实时、日榜和周榜分别查看近期与持续热门的讨论。")
+        case .attendance:
+            guide("calendar", "北京时间零点", "SeekDesk 运行时自动执行当天签到。")
+            guide("moon", "恢复后补签", "电脑休眠或应用退出后，重新运行会补签当天。")
+        case .office:
+            guide("keyboard", "快捷切换", "按设定的 ⌘⇧ 快捷键进入或退出办公视图。")
+            guide("rectangle.on.rectangle", "保留阅读状态", "恢复窗口后继续浏览之前的帖子。")
+        case .value:
+            guide("rectangle.topthird.inset.filled", "帖子右上角", "打开交易帖子，点击「估价」填写价格与到期时间。")
+            guide("arrow.left.arrow.right", "对比交易价格", "按剩余时间估值，也可以换算币种。")
+        case .block:
+            guide("person.crop.circle.badge.minus", "从作者菜单屏蔽", "在帖主或楼层作者旁打开菜单，选择屏蔽用户。")
+            guide("eye", "随时恢复", "可在原楼层临时展开，也可在这里解除屏蔽。")
+        case .authorOnly:
+            guide("person.text.rectangle", "聚焦楼主更新", "在帖子楼层标题旁开启「只看楼主」。")
+            guide("text.bubble", "返回完整讨论", "关闭开关，即可继续查看其他人的回复。")
+        case .keywords:
+            guide("text.magnifyingglass", "组合关键词", "日本+VPS 表示两个词都出现；用逗号添加另一组规则。")
+            guide("bell", "应用内与系统通知", "命中后显示应用内提示，也可开启 macOS 通知。")
+        case .rulings:
+            guide("shield.lefthalf.filled", "从作者旁查询", "点击「管理记录查询」查看公开社区记录。")
+            guide("clock", "北京时间", "查询结果统一显示为北京时间。")
+        case .proxy:
+            guide("link", "导入节点或订阅", "粘贴分享链接或订阅地址，选择自己的节点。")
+            guide("network", "仅代理 SeekDesk", "开启后只影响本应用的连接，其他 App 保持原有网络。")
+        }
+    }
+
+    private func guide(_ symbol: String, _ title: String, _ detail: String) -> some View {
+        PluginGuideRow(symbol: symbol, title: title, detail: detail, palette: palette)
+    }
+
+    private func sourceLink(_ title: String, subtitle: String, url: String) -> some View {
+        Link(destination: URL(string: url)!) {
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(title).font(.system(size: 13, weight: .medium)).foregroundStyle(palette.accent)
+                    Text(subtitle).font(.system(size: 11)).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Image(systemName: "arrow.up.right").font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
+            }.contentShape(Rectangle())
+        }.buttonStyle(.plain)
+    }
+
+    private func removalRow(_ item: DeskExtension) -> some View {
+        HStack {
+            Text("不再需要这个扩展？").font(.system(size: 12)).foregroundStyle(.secondary)
+            Spacer()
+            Button("移除扩展", role: .destructive) { extensions.remove(item) }.buttonStyle(.borderless)
+        }.padding(.horizontal, 8).padding(.top, 2)
+    }
+
+    private func settingsTitle(_ item: DeskExtension) -> String {
+        switch item {
+        case .hot: "浏览热榜"
+        case .attendance: "自动签到"
+        case .office: "办公视图与快捷键"
+        case .value: "估价工具"
+        case .block: "已屏蔽用户"
+        case .authorOnly: "阅读筛选"
+        case .keywords: "监控规则与通知"
+        case .rulings: "公开记录查询"
+        case .proxy: "连接设置"
+        }
+    }
+
+    private func settingsSymbol(_ item: DeskExtension) -> String {
+        switch item {
+        case .hot: "flame"
+        case .block: "person.2"
+        case .value: "plus.forwardslash.minus"
+        case .keywords: "bell.badge"
+        default: "slider.horizontal.3"
+        }
     }
 
     @ViewBuilder private func controls(_ item: DeskExtension) -> some View {
         switch item {
+        case .proxy:
+            DeskProxySettingsView(available: extensions.active(.proxy), palette: palette)
         case .attendance:
             VStack(alignment: .leading, spacing: 12) {
-                Picker("签到方式", selection: $extensions.attendanceMode) {
-                    ForEach(ForumAttendanceMode.allCases) { mode in Text(mode.title).tag(mode) }
+                Text("签到方式").font(.callout)
+                DeskGlassPicker(values: ForumAttendanceMode.allCases, selection: $extensions.attendanceMode,
+                                tint: palette.accent, solid: palette.selection, compact: true) { mode, _ in
+                    Text(mode.title).font(.system(size: 12, weight: .semibold))
                 }
-                .pickerStyle(.segmented)
+                .accessibilityLabel("签到方式")
                 Toggle("每天 00:00 自动签到", isOn: $extensions.autoAttendance).toggleStyle(.switch)
                     .disabled(!extensions.active(.attendance))
                 Text("按北京时间签到。电脑休眠或应用退出时，恢复运行后会补签当天。")
@@ -208,15 +324,39 @@ struct PluginCenterView: View {
                 }
             }
         case .hot:
-            Link("原热榜项目", destination: URL(string: "https://greasyfork.org/scripts/560065")!).font(.caption)
+            VStack(alignment: .leading, spacing: 18) {
+                Text("发现社区里正在热议的帖子。")
+                    .font(.system(size: 13)).foregroundStyle(.secondary)
+                HStack(spacing: 0) {
+                    ForEach([("实时", "当下热议"), ("日榜", "今天热门"), ("周榜", "本周精选")], id: \.0) { entry in
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text(entry.0).font(.system(size: 15, weight: .semibold))
+                            Text(entry.1).font(.system(size: 11)).foregroundStyle(.secondary)
+                        }.frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }.padding(16).background(palette.selection.opacity(0.45), in: RoundedRectangle(cornerRadius: 12))
+                Button(action: showHot) { Label("打开热榜", systemImage: "flame") }
+                    .buttonStyle(.borderedProminent).controlSize(.large).tint(palette.accent)
+                    .disabled(!extensions.active(.hot))
+            }
         case .office:
-            HStack {
-                TextField("工作表标题", text: $extensions.officeTitle).textFieldStyle(.roundedBorder)
-                TextField("按钮名称", text: $extensions.officeButton).textFieldStyle(.roundedBorder)
-                Picker("⌘⇧ 快捷键", selection: $extensions.officeKey) {
-                    ForEach(["7", "8", "9", "0"], id: \.self) { Text($0).tag($0) }
+            VStack(alignment: .leading, spacing: 16) {
+                VStack(alignment: .leading, spacing: 7) {
+                    Text("工作表标题").font(.system(size: 12, weight: .medium))
+                    TextField("工作计划", text: $extensions.officeTitle).textFieldStyle(.roundedBorder).controlSize(.large)
                 }
-                Button("切换办公视图") { extensions.officePresented = true }.disabled(!extensions.active(.office))
+                VStack(alignment: .leading, spacing: 7) {
+                    Text("工具栏按钮名称").font(.system(size: 12, weight: .medium))
+                    TextField("切换办公视图", text: $extensions.officeButton).textFieldStyle(.roundedBorder).controlSize(.large)
+                }
+                HStack {
+                    Picker("⌘⇧ 快捷键", selection: $extensions.officeKey) {
+                        ForEach(["7", "8", "9", "0"], id: \.self) { Text($0).tag($0) }
+                    }.fixedSize()
+                    Spacer()
+                    Button("切换办公视图") { extensions.officePresented = true }
+                        .buttonStyle(.bordered).disabled(!extensions.active(.office))
+                }
             }
         case .value:
             VStack(alignment: .leading, spacing: 9) {
@@ -227,38 +367,57 @@ struct PluginCenterView: View {
             }
         case .block:
             if extensions.blocked.isEmpty {
-                Text("在帖主或楼层作者旁打开菜单，即可屏蔽。已屏蔽的楼层可以临时展开或解除屏蔽。")
-                    .font(.caption).foregroundStyle(.secondary)
+                VStack(spacing: 10) {
+                    Image(systemName: "person.2.slash").font(.system(size: 27, weight: .light)).foregroundStyle(palette.accent)
+                    Text("还没有屏蔽用户").font(.system(size: 14, weight: .medium))
+                    Text("从帖子作者旁的菜单添加，屏蔽名单会显示在这里。")
+                        .font(.system(size: 12)).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                }.padding(.vertical, 18).frame(maxWidth: .infinity)
             } else {
                 ForEach(extensions.blocked) { entry in
                     HStack {
+                        Image(systemName: "person.crop.circle").font(.system(size: 22)).foregroundStyle(.secondary)
                         Text(entry.name).lineLimit(1)
                         Spacer()
                         Button("解除屏蔽") { extensions.unblock(entry) }
-                    }
+                    }.padding(12).background(palette.surface.opacity(0.45), in: RoundedRectangle(cornerRadius: 10))
                 }
             }
         case .authorOnly:
-            Text("启用后，帖子楼层标题旁会出现「只看楼主」开关。").font(.callout).foregroundStyle(.secondary)
+            guide("line.3.horizontal.decrease", "筛选作者正文与回复", "启用后，帖子内会提供「只看楼主」开关。每篇讨论可按需要切换。")
         case .rulings:
-            Text("在帖子作者旁点「管理记录查询」。NS Seek 社区服务仅接收被查询的公开用户名，结果中的时间按北京时间显示。")
-                .font(.callout).foregroundStyle(.secondary)
+            guide("person.text.rectangle", "查询社区公开记录", "在帖子作者旁点「管理记录查询」，即可打开查询面板。")
+            Divider()
+            Label("NS Seek 社区服务仅接收被查询的公开用户名。", systemImage: "hand.raised")
+                .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
         case .keywords:
-            VStack(alignment: .leading, spacing: 9) {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("关键词规则").font(.system(size: 12, weight: .medium))
                 TextField("关键词规则，例如 日本+VPS，测评", text: $selection.watchInput).textFieldStyle(.roundedBorder)
+                    .controlSize(.large)
                     .accessibilityLabel("关键词规则")
                     .onSubmit(saveWatchSettings)
                 Text("逗号分隔的规则满足任意一组即可。用 + 连接的词必须出现在同一篇帖子的标题或 RSS 摘要里，顺序不限。")
                     .font(.caption).foregroundStyle(.secondary)
-                Text("例如「日本+VPS，测评」会提醒同时含有「日本」和「VPS」的帖子，也会提醒含有「测评」的帖子。最多 25 组。")
-                    .font(.caption).foregroundStyle(.secondary)
+                Text("最多 25 组，例如：日本+VPS，测评。")
+                    .font(.system(size: 12)).foregroundStyle(.secondary)
                 TextField("备注（可选）", text: $selection.watchNoteInput).textFieldStyle(.roundedBorder)
+                    .controlSize(.large)
                     .onSubmit(saveWatchSettings)
-                HStack {
-                    Text(watchStatus).font(.caption).foregroundStyle(.secondary)
-                    Spacer()
-                    Button("保存监控设置", action: saveWatchSettings)
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 12) {
+                        Text(watchStatus).font(.caption).foregroundStyle(.secondary).fixedSize()
+                        Spacer(minLength: 8)
+                        saveWatchButton
+                    }
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text(watchStatus).font(.caption).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        saveWatchButton
+                    }
                 }
+                Divider().padding(.vertical, 2)
                 Toggle("发送 macOS 通知", isOn: Binding(get: { extensions.watchSystemNotifications },
                                                         set: extensions.setWatchSystemNotifications))
                     .toggleStyle(.switch)
@@ -273,6 +432,8 @@ struct PluginCenterView: View {
                 ForEach(extensions.hits) { hit in
                     Button { _ = openTopic(hit.post.url) } label: {
                         DeskLabel(hit.post.title, systemImage: "arrow.up.right").lineLimit(2)
+                            .frame(maxWidth: .infinity, alignment: .leading).padding(12)
+                            .background(palette.surface.opacity(0.5), in: RoundedRectangle(cornerRadius: 10))
                     }.buttonStyle(.plain)
                 }
             }
@@ -292,6 +453,11 @@ struct PluginCenterView: View {
         extensions.watchWords = selection.watchInput
     }
 
+    private var saveWatchButton: some View {
+        Button("保存监控设置", action: saveWatchSettings)
+            .buttonStyle(.borderedProminent).tint(palette.accent).fixedSize()
+    }
+
     private var watchStatus: String {
         if !extensions.active(.keywords) { return "监控已关闭" }
         if extensions.watchFailed { return "RSS 暂时无法连接，稍后自动重试" }
@@ -300,7 +466,7 @@ struct PluginCenterView: View {
         return "正在检查新帖…"
     }
 
-    private enum Catalog { case installed, all }
+    private enum Catalog: Hashable { case installed, all }
 
     @MainActor private final class Selection: ObservableObject {
         @Published var item: DeskExtension?

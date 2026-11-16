@@ -1,0 +1,33 @@
+name: seekdesk_flutter
+description: SeekDesk desktop interface and native service bridge.
+publish_to: none
+version: 1.5.0+71
+
+environment:
+  sdk: '>=3.14.0 <4.0.0'
+  flutter: '>=3.50.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  liquid_glass_widgets:
+    path: ../Vendor/liquid_glass_widgets
+  cupertino_icons: 1.0.8
+  markdown: 7.3.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: 6.0.0
+
+flutter:
+  uses-material-design: false
+  assets:
+    - assets/brand/
+    - assets/partners/
+    - assets/reader/reader-dark.png
+    - assets/reader/reader-light.png
+    - assets/reader/mist-lake.jpg
+    - assets/reader/pine-dusk.jpg
+    - assets/reader/sea-glass.jpg
+    - assets/reader/midnight-tide.jpg

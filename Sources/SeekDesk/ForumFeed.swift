@@ -18,12 +18,12 @@ struct FeedPost: Identifiable, Codable, Equatable {
 enum ForumFeed {
     static let url = URL(string: "https://rss.nodeseek.com/")!
 
-    private static func makeSession() -> URLSession {
+    private static func makeSession() -> DeskProxySession {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.httpShouldSetCookies = false
         configuration.urlCredentialStorage = nil
         configuration.timeoutIntervalForResource = 20
-        return URLSession(configuration: configuration)
+        return DeskProxyNetwork.shared.makeSession(configuration: configuration)
     }
 
     private static func makeRequest() -> URLRequest {

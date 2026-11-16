@@ -5,7 +5,9 @@ SeekDesk 是独立开发的第三方客户端，与 NodeSeek 官方没有隶属�
 ## 软件组件
 
 - [Sparkle 2.10.1](https://sparkle-project.org/)：macOS 应用更新框架。完整许可随源码和应用保留于 [Distribution/Sparkle-LICENSE.txt](Distribution/Sparkle-LICENSE.txt)。V1.0.0 尚未启用生产更新源。
+- [Xray-core 26.11.9](https://github.com/XTLS/Xray-core/tree/v26.11.9)：应用内专用代理内核，采用 MPL-2.0。仅随应用内嵌独立可执行文件，上游源码未作修改；[对应源代码](https://github.com/XTLS/Xray-core/tree/v26.11.9)、[完整许可](Distribution/ProxyCore/Xray-LICENSE.txt)及[来源与校验信息](Distribution/ProxyCore/README.txt)随源码保留，许可和来源信息也随应用分发。
 - Swift、SwiftUI、AppKit、WebKit、ImageIO、Security、JavaScriptCore 和 UserNotifications 为 Apple 平台或工具链提供的组件，遵循其各自条款。
+- [Yams 6.2.2](https://github.com/jpsim/Yams/tree/6.2.2) 与其内含的 libyaml：用于解析 Clash 订阅中的 YAML 节点列表，均采用 MIT 许可。[源码和来源记录](Vendor/Yams/README.seekdesk.txt)、[Yams 许可](Vendor/Yams/LICENSE)及 [libyaml 许可](Vendor/Yams/libyaml-LICENSE.txt)随项目保留，许可也随应用分发。解析器源文件未作修改，包清单仅移除未随包保留的上游测试，并暴露 CYaml 供输入复杂度检查使用。
 
 ## 社区项目与服务
 

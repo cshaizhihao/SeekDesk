@@ -58,11 +58,38 @@ final class ForumSession: ObservableObject {
     @Published private(set) var reactionMarks: [ForumReactionTarget: ForumReactionResult] = [:]
     private var pendingReplyNavigation = Set<String>()
     @Published private(set) var titles: [String: String] = [:]
+    /// Called after a valid title update or confirmed-owner restoration. It is
+    /// not fired midway through access invalidation, before Workspace redacts.
+    var titlesDidChange: (() -> Void)?
+    var retainedTitleIDs: (() -> Set<String>)?
+    private let titleStore: ForumTitleStore
+    private var titleStorageClosed = false
+    struct TitleRead {
+        let authorization: Authorization
+        let sequence: UInt64
+    }
+    private var titleSequence: UInt64 = 0
+    private var publicTitleSequences: [String: UInt64] = [:]
     @Published private(set) var drafts: [String: String] = [:]
-    @Published var messageDrafts: [Int: String] = [:] { didSet { persistDrafts() } }
+    @Published var messageDrafts: [Int: String] = [:] {
+        didSet {
+            changedMessageDrafts(Set(oldValue.keys).union(messageDrafts.keys).filter { oldValue[$0] != messageDrafts[$0] })
+            persistDrafts()
+        }
+    }
+    @Published var messageMarkdown: [Int: Bool] = [:] {
+        didSet {
+            changedMessageDrafts(Set(oldValue.keys).union(messageMarkdown.keys).filter {
+                oldValue[$0, default: true] != messageMarkdown[$0, default: true]
+            })
+            persistDrafts()
+        }
+    }
+    private var messageDraftRevisions: [Int: UInt64] = [:]
     @Published var messageStatus: [Int: String] = [:]
     @Published var sendingMessages: Set<Int> = []
-    @Published private(set) var profiles: [Int: ForumUserProfile] = [:]
+    let profileStore = ForumProfileStore()
+    var profiles: [Int: ForumUserProfile] { profileStore.profiles }
     @Published private(set) var ownProfile: ForumProfile?
     @Published private(set) var ownIntroduction: ForumIntroduction?
     @Published private(set) var conversationContacts: [ForumConversationContact] = []
@@ -70,8 +97,9 @@ final class ForumSession: ObservableObject {
     @Published var requestedPeer: ForumConversation?
     private var profileRequests: [Int: UUID] = [:]
     private var profileUpdated: [Int: Date] = [:]
-    @Published private(set) var profileFailures: Set<Int> = []
-    @Published private(set) var profileLoading: Set<Int> = []
+    let profileRequestState = ForumProfileRequestState()
+    var profileFailures: Set<Int> { profileRequestState.failures }
+    var profileLoading: Set<Int> { profileRequestState.loading }
     private let profileLifetime: TimeInterval = 180
     private var savingIntroduction = false
     private var unreadPage: ForumWebPage?
@@ -81,8 +109,17 @@ final class ForumSession: ObservableObject {
     private var nextOwnProfileRefresh = Date.distantPast
     private var conversationContactOwner: Int?
     private var threadMemory: [URL: ForumThread] = [:]
+    private var threadUpdated: [URL: Date] = [:]
+    // Per-topic generations isolate background writes. Eviction also produces a
+    // new generation on the next lookup, so an older in-flight read stays stale.
+    private var threadWriteRevisions: [String: UUID] = [:]
+    private var threadRevisionOrder: [String] = []
+    private let threadLifetime: TimeInterval = 120
+    private let threadNow: () -> Date
     private var recentPages: [URL] = []
-    private var readingAnchors: [URL: String] = [:]
+    private var threadCosts: [URL: Int] = [:]
+    private var threadCost = 0
+    let readingProgress: ReadingProgress
     private var pendingEdits: [URL: ForumInlineEdit] = [:]
     enum DraftScope: Hashable {
         case reply(String), message(Int)
@@ -96,6 +133,7 @@ final class ForumSession: ObservableObject {
         }
     }
     private var draftImages: [DraftScope: DraftImageSizing] = [:]
+    private var proxyObserver: AnyCancellable?
     let dataStore: WKWebsiteDataStore
     @Published private(set) var newDiscussion = NewDiscussionDraft()
     private let defaults: UserDefaults
@@ -116,11 +154,32 @@ final class ForumSession: ObservableObject {
     }
     private var restoringDrafts = false
 
-    init(defaults: UserDefaults = .standard, dataStore: WKWebsiteDataStore? = nil, requests: Requests? = nil, profileNow: @escaping () -> Date = Date.init) {
+    init(defaults: UserDefaults = .standard, dataStore: WKWebsiteDataStore? = nil, requests: Requests? = nil,
+         profileNow: @escaping () -> Date = Date.init, threadNow: @escaping () -> Date = Date.init) {
         self.defaults = defaults
+        titleStore = ForumTitleStore(defaults: defaults)
+        readingProgress = ReadingProgress(defaults: defaults)
         self.requests = requests ?? .live
         self.profileNow = profileNow
+        self.threadNow = threadNow
         self.dataStore = dataStore ?? .default()
+        DeskProxyWebKit.configure(self.dataStore)
+        proxyObserver = NotificationCenter.default.publisher(for: .deskProxyRouteChanged).sink { [weak self] _ in
+            guard let self else { return }
+            self.persistDrafts()
+            self.cancelPendingDraftCredentialReads()
+            self.unreadRevision += 1
+            self.unreadPage = nil
+            self.clearThreadMemory()
+            self.profileRequests.removeAll()
+            self.profileRequestState.reset()
+            self.sending.removeAll()
+            self.sendingMessages.removeAll()
+            self.reactionPending = nil
+            self.savingIntroduction = false
+            self.accessRevision += 1
+            self.accessDidChange?()
+        }
         newDiscussion.didChange = { [weak self] in self?.persistDrafts() }
         newDiscussion.imageSizing.didChange = { [weak self] in self?.persistDrafts() }
     }
@@ -130,11 +189,12 @@ final class ForumSession: ObservableObject {
         var images = Dictionary(uniqueKeysWithValues: draftImages.map { ($0.key.storageKey, $0.value.sizes) })
         images["discussion"] = newDiscussion.imageSizing.sizes
         let value = ForumDraftSnapshot(replies: drafts, messages: messageDrafts,
-                                      discussion: newDiscussion.snapshot, images: images)
+                                      discussion: newDiscussion.snapshot, images: images, messageMarkdown: messageMarkdown)
         if let data = try? JSONEncoder().encode(value) { defaults.set(data, forKey: "forum.drafts.v1.\(owner)") }
     }
 
     private func restoreDrafts(for owner: Int?) {
+        cancelPendingDraftCredentialReads()
         for sizing in draftImages.values { sizing.didChange = nil }
         newDiscussion.didChange = nil
         newDiscussion.imageSizing.didChange = nil
@@ -144,6 +204,8 @@ final class ForumSession: ObservableObject {
             .flatMap { try? JSONDecoder().decode(ForumDraftSnapshot.self, from: $0) } ?? ForumDraftSnapshot()
         drafts = saved.replies
         messageDrafts = saved.messages
+        messageMarkdown = saved.messageMarkdown
+        messageDraftRevisions.removeAll()
         draftImages = [:]
         for (key, sizes) in saved.images {
             guard let scope = DraftScope(storageKey: key) else { continue }
@@ -163,10 +225,16 @@ final class ForumSession: ObservableObject {
         newDiscussion = discussion
     }
 
+    func cancelPendingDraftCredentialReads() {
+        for sizing in draftImages.values { sizing.cancelPendingCredentialRead() }
+        newDiscussion.imageSizing.cancelPendingCredentialRead()
+    }
+
     /// Invalidate every visible/request state derived from the current identity.
     /// The cookie store itself is kept so the official login can be rechecked.
     private func invalidateAccess() {
         persistDrafts()
+        readingProgress.activate(nil)
         memberID = nil
         restoreDrafts(for: nil)
         ownProfile = nil
@@ -180,6 +248,7 @@ final class ForumSession: ObservableObject {
         clearThreadMemory()
         pendingEdits.removeAll()
         titles.removeAll()
+        publicTitleSequences.removeAll()
         receipts.removeAll()
         pendingReplyNavigation.removeAll()
         sending.removeAll()
@@ -187,25 +256,27 @@ final class ForumSession: ObservableObject {
         messageStatus.removeAll()
         reactionPending = nil
         savingIntroduction = false
-        profiles.removeAll()
+        profileStore.removeAll()
         profileRequests.removeAll()
-        profileLoading.removeAll()
+        profileRequestState.reset()
         profileUpdated.removeAll()
-        profileFailures.removeAll()
         accessRevision += 1
         accessDidChange?()
     }
 
     func observeIdentity(_ identity: ForumIdentity) {
+        guard !titleStorageClosed else { return }
         observeAccount(identity.signedIn)
         if identity.signedIn, let id = identity.id { confirmOwner(id) }
     }
 
     private func confirmOwner(_ id: Int) {
-        guard account == .signedIn, memberID != id else { return }
+        guard !titleStorageClosed, id > 0, account == .signedIn, memberID != id else { return }
         invalidateAccess()
         memberID = id
+        readingProgress.activate(id)
         restoreDrafts(for: id)
+        replaceTitles(titleStore.titles(for: id))
     }
 
     func signIn() { showAccess(Forum.signIn, verification: false) }
@@ -222,6 +293,7 @@ final class ForumSession: ObservableObject {
     }
 
     func observeAccount(_ signedIn: Bool) {
+        if signedIn && titleStorageClosed { return }
         let state: Account = signedIn ? .signedIn : .signedOut
         guard account != state else { return }
         let previous = account
@@ -229,11 +301,43 @@ final class ForumSession: ObservableObject {
         if !signedIn || previous == .signedOut { invalidateAccess() }
     }
 
-    func cachedThread(at url: URL) -> ForumThread? { threadMemory[Forum.pageURL(url)] }
+    func cachedThread(at url: URL) -> ForumThread? {
+        let page = Forum.pageURL(url)
+        guard let thread = threadMemory[page] else { return nil }
+        recentPages.removeAll { $0 == page }
+        recentPages.append(page)
+        return thread
+    }
+
+    func threadIsFresh(at url: URL) -> Bool {
+        let page = Forum.pageURL(url)
+        guard threadMemory[page] != nil else { return false }
+        return threadIsFresh(since: threadUpdated[page])
+    }
+
+    var threadReadTime: Date { threadNow() }
+
+    func threadIsFresh(since updated: Date?) -> Bool {
+        guard let updated else { return false }
+        let age = threadNow().timeIntervalSince(updated)
+        return age >= 0 && age < threadLifetime
+    }
+
+    func threadRevision(_ id: String) -> UUID {
+        let revision = threadWriteRevisions[id] ?? UUID()
+        threadWriteRevisions[id] = revision
+        threadRevisionOrder.removeAll { $0 == id }
+        threadRevisionOrder.append(id)
+        while threadRevisionOrder.count > 128 {
+            threadWriteRevisions.removeValue(forKey: threadRevisionOrder.removeFirst())
+        }
+        return revision
+    }
 
     func invalidateThread(_ id: String) {
-        threadMemory = threadMemory.filter { Forum.topicID($0.key) != id }
-        recentPages.removeAll { Forum.topicID($0) == id }
+        threadWriteRevisions[id] = UUID()
+        _ = threadRevision(id)
+        for page in recentPages.filter({ Forum.topicID($0) == id }) { removeCachedThread(at: page) }
     }
 
     func pendingEdit(at url: URL) -> ForumInlineEdit? { pendingEdits[Forum.pageURL(url)] }
@@ -242,27 +346,47 @@ final class ForumSession: ObservableObject {
 
     func cacheThread(_ thread: ForumThread, at url: URL) {
         let pageURL = Forum.pageURL(url)
+        let cost = ForumThreadCacheCost.estimate(thread)
+        removeCachedThread(at: pageURL)
+        // Oversized reports remain readable in the active reader without
+        // evicting every small parsed page or retaining extra WebKit instances.
+        guard cost <= ForumThreadCacheCost.limit else { return }
         threadMemory[pageURL] = thread
-        recentPages.removeAll { $0 == pageURL }
+        threadUpdated[pageURL] = threadNow()
+        threadCosts[pageURL] = cost
+        threadCost += cost
         recentPages.append(pageURL)
-        if recentPages.count > 4 {
-            let discarded = recentPages.removeFirst()
-            threadMemory.removeValue(forKey: discarded)
-            readingAnchors.removeValue(forKey: discarded)
+        while recentPages.count > 8 || threadCost > ForumThreadCacheCost.limit {
+            guard let discarded = recentPages.first else { break }
+            removeCachedThread(at: discarded)
         }
     }
 
-    func anchor(at url: URL) -> String? { readingAnchors[Forum.pageURL(url)] }
+    private func removeCachedThread(at page: URL) {
+        threadMemory.removeValue(forKey: page)
+        threadUpdated.removeValue(forKey: page)
+        threadCost -= threadCosts.removeValue(forKey: page) ?? 0
+        recentPages.removeAll { $0 == page }
+    }
 
-    func rememberAnchor(_ anchor: String, at url: URL) {
-        let page = Forum.pageURL(url)
-        if threadMemory[page] != nil { readingAnchors[page] = anchor }
+    func anchor(at url: URL) -> String? { readingProgress.anchor(at: url) }
+
+    func rememberAnchor(_ anchor: String, at url: URL, authorization token: Authorization) {
+        guard token == authorization else { return }
+        readingProgress.remember(anchor, at: url)
     }
 
     private func clearThreadMemory() {
+        DeskMarkdownText.removeAll()
+        ForumMarkdownLink.removeAll()
+        MarkdownPreviewParsing.removeAll()
         threadMemory.removeAll()
+        threadUpdated.removeAll()
+        threadWriteRevisions.removeAll()
+        threadRevisionOrder.removeAll()
         recentPages.removeAll()
-        readingAnchors.removeAll()
+        threadCosts.removeAll()
+        threadCost = 0
         reactionMarks.removeAll()
     }
 
@@ -395,7 +519,7 @@ final class ForumSession: ObservableObject {
                 if var profile = profiles[owner] {
                     profile.readme = data.readme
                     profile.signature_markdown = data.signature
-                    profiles[owner] = profile
+                    profileStore.update(profile)
                 }
             }
             return result
@@ -407,7 +531,7 @@ final class ForumSession: ObservableObject {
         let key = "forum.conversationContacts.\(member)"
         if conversationContactOwner != member {
             conversationContactOwner = member
-            conversationContacts = UserDefaults.standard.data(forKey: key).flatMap {
+            conversationContacts = defaults.data(forKey: key).flatMap {
                 try? JSONDecoder().decode([ForumConversationContact].self, from: $0)
             } ?? []
         }
@@ -419,7 +543,7 @@ final class ForumSession: ObservableObject {
         }.prefix(500))
         guard updated != conversationContacts else { return }
         conversationContacts = updated
-        if let data = try? JSONEncoder().encode(updated) { UserDefaults.standard.set(data, forKey: key) }
+        if let data = try? JSONEncoder().encode(updated) { defaults.set(data, forKey: key) }
     }
 
     private func clearConversationContacts() {
@@ -484,12 +608,11 @@ final class ForumSession: ObservableObject {
         guard !Task.isCancelled, revision == accessRevision else { return }
         let request = UUID()
         profileRequests[id] = request
-        profileLoading.insert(id)
-        profileFailures.remove(id)
+        profileRequestState.begin(id)
         defer {
             if profileRequests[id] == request {
                 profileRequests[id] = nil
-                profileLoading.remove(id)
+                profileRequestState.finish(id)
             }
         }
         do {
@@ -514,13 +637,13 @@ final class ForumSession: ObservableObject {
             }
             if profiles.count >= 240, profiles[id] == nil,
                let oldest = profileUpdated.min(by: { $0.value < $1.value })?.key {
-                profiles[oldest] = nil
+                profileStore.remove(oldest)
                 profileUpdated[oldest] = nil
             }
-            profiles[id] = profile
+            profileStore.update(profile)
             profileUpdated[id] = profileNow()
         } catch {
-            if !Task.isCancelled, revision == accessRevision { profileFailures.insert(id) }
+            if !Task.isCancelled, revision == accessRevision { profileRequestState.fail(id) }
         }
     }
 
@@ -536,14 +659,85 @@ final class ForumSession: ObservableObject {
     }
 
     func edit(_ draft: String, for id: String) {
-        guard canCompose else { return }
+        guard canCompose, drafts[id, default: ""] != draft else { return }
         if draft.isEmpty { drafts.removeValue(forKey: id) }
         else { drafts[id] = draft }
         persistDrafts()
     }
 
     func rememberTitle(_ title: String, for id: String) {
-        if !title.isEmpty, titles[id] != title { titles[id] = title }
+        rememberTitle(title, for: id, authorization: authorization)
+    }
+
+    /// Allocate when the transport actually begins, never when its response
+    /// arrives. The counter stays monotonic across identity revisions.
+    func beginTitleRead() -> TitleRead {
+        titleSequence += 1
+        return TitleRead(authorization: authorization, sequence: titleSequence)
+    }
+
+    /// Synchronous confirmed writes (including a successful inline edit) are
+    /// newer than every read begun before this acknowledgement.
+    func rememberTitle(_ title: String, for id: String, authorization token: Authorization) {
+        guard !titleStorageClosed, token == authorization else { return }
+        rememberTitle(title, for: id, request: beginTitleRead())
+    }
+
+    func rememberCachedTitle(_ title: String, for id: String) {
+        guard titles[id] == nil else { return }
+        rememberTitle(title, for: id, request: TitleRead(authorization: authorization, sequence: 0))
+    }
+
+    func rememberTitle(_ title: String, for id: String, request: TitleRead) {
+        let token = request.authorization
+        guard !titleStorageClosed, token == authorization,
+              let title = ForumTitleStore.validTitle(title, id: id) else { return }
+        if canCompose, let owner = token.owner {
+            titleStore.record([.init(id: id, title: title, source: .reader)], owner: owner,
+                              sequence: request.sequence, preserving: retainedTitleIDs?() ?? [])
+            replaceTitles(titleStore.titles(for: owner))
+        } else {
+            // A public read may still name its tab while signed out. These
+            // labels stay in memory and never acquire a guessed account owner.
+            guard request.sequence >= publicTitleSequences[id, default: 0] else { return }
+            var current = titles
+            if current[id] == nil, current.count >= ForumTitleStore.maximumTitles,
+               let oldest = current.keys.sorted().first { current.removeValue(forKey: oldest) }
+            current[id] = title
+            publicTitleSequences[id] = request.sequence
+            publicTitleSequences = publicTitleSequences.filter { current[$0.key] != nil }
+            replaceTitles(current)
+        }
+    }
+
+    func rememberListingTitles(_ posts: [FeedPost], request: TitleRead, feed: Bool = false) {
+        let token = request.authorization
+        guard !titleStorageClosed, authorizes(token), let owner = token.owner else { return }
+        let entries = posts.compactMap { post -> ForumTitleStore.Entry? in
+            guard Forum.topicID(post.url) == post.id else { return nil }
+            return .init(id: post.id, title: post.title, source: feed ? .feed : .listing)
+        }
+        titleStore.record(entries, owner: owner, sequence: request.sequence, preserving: retainedTitleIDs?() ?? [])
+        replaceTitles(titleStore.titles(for: owner))
+    }
+
+    private func replaceTitles(_ value: [String: String]) {
+        guard titles != value else { return }
+        titles = value
+        titlesDidChange?()
+    }
+
+    /// The production shutdown path persists account data before revoking
+    /// request tokens. Revocation only clears visible titles, not owner caches.
+    func prepareForShutdown() {
+        guard !titleStorageClosed else { return }
+        titleStorageClosed = true
+        titleStore.flush()
+        let previous = authorization
+        observeAccount(false)
+        // Even an already signed-out session can own read-only requests.
+        // Retire their revision as well; the operation remains idempotent.
+        if authorization == previous { invalidateAccess() }
     }
 
     func clearReceipt(_ id: String) { receipts.removeValue(forKey: id) }
@@ -558,24 +752,42 @@ final class ForumSession: ObservableObject {
         return sizing
     }
 
+    func ownsImageSizing(_ sizing: DraftImageSizing, for scope: DraftScope) -> Bool {
+        draftImages[scope] === sizing
+    }
+
+    /// Changes, including A → B → A, retire an in-flight send's clear intent.
+    /// Revisions are session-local; persisted content/mode remain per owner.
+    func messageDraftRevision(for peer: Int) -> UInt64 { messageDraftRevisions[peer, default: 0] }
+
+    private func changedMessageDrafts(_ peers: Set<Int>) {
+        guard !restoringDrafts else { return }
+        for peer in peers { messageDraftRevisions[peer, default: 0] &+= 1 }
+    }
+
     @discardableResult
     func send(topic: Topic, on page: ForumWebPage) -> Task<Void, Never>? {
         guard let original = drafts[topic.id], !original.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               let postID = Int(topic.id), canCompose, !sending.contains(topic.id) else { return nil }
         let sizing = imageSizing(for: .reply(topic.id))
+        let originalSizes = sizing.sizes
         let token = authorization
         sending.insert(topic.id)
         clearReceipt(topic.id)
         return Task { [self, page] in
             defer { if token == authorization { sending.remove(topic.id) } }
+            let isCurrent: DraftImageSizing.Authorization = { [self] in
+                authorizes(token) && sending.contains(topic.id) && ownsImageSizing(sizing, for: .reply(topic.id))
+            }
             let content: String
-            do { content = try await sizing.prepare(original) }
+            do { content = try await sizing.prepare(original, authorized: isCurrent) }
+            catch is CancellationError { return }
             catch {
-                guard authorizes(token) else { return }
+                guard !Task.isCancelled, isCurrent() else { return }
                 receipts[topic.id] = Receipt(message: (error as? NodeImageError ?? .connection).localizedDescription + " 草稿已保留。")
                 return
             }
-            guard authorizes(token) else { return }
+            guard !Task.isCancelled, isCurrent() else { return }
             let result: ReplyEnvelope?
             do {
                 let value = try await requests.reply(page, postID, content)
@@ -594,7 +806,7 @@ final class ForumSession: ObservableObject {
                         destination = response.destination(from: topic.url)
                     }
                     guard authorizes(token) else { return }
-                    if drafts[topic.id] == original {
+                    if drafts[topic.id] == original, sizing.sizes == originalSizes {
                         edit("", for: topic.id)
                         sizing.reset()
                     }
@@ -628,19 +840,46 @@ private struct ReplyEnvelope: Decodable {
 
 @MainActor
 final class ForumReaderState: ObservableObject {
-    enum Phase { case loading, ready(ForumThread), failed(ForumPageError) }
-    @Published private(set) var phase: Phase
+    enum Phase {
+        case loading, ready(ForumThread), failed(ForumPageError)
+    }
+    @Published private(set) var phase: Phase {
+        didSet {
+            floorIDs = Self.floorIDs(in: phase)
+            if case .ready(let thread) = phase { preparesWholePage = ReaderLayoutPolicy.preparesWholePage(thread) }
+            else { preparesWholePage = false }
+        }
+    }
+    private(set) var floorIDs: Set<String>
+    private(set) var preparesWholePage: Bool
     @Published private(set) var isLoading = true
     @Published private(set) var refreshIssue: ForumPageError?
-    private(set) var page: ForumWebPage?
+    @Published private(set) var pageReady = false
+    private(set) var page: ForumWebPage? {
+        didSet { if pageReady != (page != nil) { pageReady = page != nil } }
+    }
+    struct ProfileTaskKey: Equatable { let authorID: Int?; let pageReady: Bool }
+    func profileTaskKey(for id: Int?) -> ProfileTaskKey { ProfileTaskKey(authorID: id, pageReady: pageReady) }
     private var visibleURL: URL?
     private var latest: UUID?
+    typealias Fetch = (URL, ForumSession) async throws -> (ForumThread, ForumWebPage)
+    private var fetchTask: Task<(ForumThread, ForumWebPage, ForumSession.TitleRead), Error>?
+    private var pageRevision: UUID?
+    private var pageUpdated: Date?
     private var accessObserver: AnyCancellable?
+    private let startedWithCachedThread: Bool
 
     init(topic: Topic, session: ForumSession) {
         visibleURL = Forum.pageURL(topic.url)
-        phase = session.cachedThread(at: topic.url).map(Phase.ready) ?? .loading
+        let cached = session.cachedThread(at: topic.url)
+        startedWithCachedThread = cached != nil
+        phase = cached.map(Phase.ready) ?? .loading
+        floorIDs = Self.floorIDs(in: cached.map(Phase.ready) ?? .loading)
+        preparesWholePage = cached.map(ReaderLayoutPolicy.preparesWholePage) ?? false
+        isLoading = cached == nil
         accessObserver = session.$accessRevision.dropFirst().sink { [weak self] _ in
+            self?.fetchTask?.cancel()
+            self?.fetchTask = nil
             self?.latest = nil
             self?.phase = .loading
             self?.page = nil
@@ -649,11 +888,47 @@ final class ForumReaderState: ObservableObject {
         }
     }
 
-    func load(_ topic: Topic, session: ForumSession,
-              fetch: ((URL, ForumSession) async throws -> (ForumThread, ForumWebPage))? = nil) async {
-        guard !Task.isCancelled else { return }
-        let request = UUID()
+    private static func floorIDs(in phase: Phase) -> Set<String> {
+        guard case .ready(let thread) = phase else { return [] }
+        return Set(thread.replies.map(\.readerID) + (thread.root == nil ? [] : ["floor-0"]))
+    }
+
+    func initialRefreshDelay(returningToPosition: Bool) -> Duration {
+        startedWithCachedThread && returningToPosition ? .milliseconds(350) : .milliseconds(100)
+    }
+
+    static func canPresentFromTop(_ cached: ForumThread?, at url: URL, anchor: String?) -> Bool {
+        cached?.page == 1 && url.fragment == nil && (anchor == nil || anchor == "thread-title")
+    }
+
+    func cancel() {
+        fetchTask?.cancel()
+        fetchTask = nil
+        latest = nil
+        page?.webView.stopLoading()
+        page = nil
+        isLoading = false
+    }
+
+    @discardableResult
+    func load(_ topic: Topic, session: ForumSession, force: Bool = false,
+              fetch: Fetch? = nil) async -> Bool {
+        guard !Task.isCancelled else { return false }
         let url = Forum.pageURL(topic.url)
+        // A delayed ordinary appearance must not cancel a page being prepared
+        // for an explicit interaction, nor turn its busy feedback off.
+        if !force, session.threadIsFresh(at: url), let cached = session.cachedThread(at: url) {
+            if visibleURL == url, isLoading { return false }
+            if visibleURL != url { cancel(); visibleURL = url }
+            if case .ready(let existing) = phase, existing == cached {} else { phase = .ready(cached) }
+            isLoading = false
+            refreshIssue = nil
+            session.rememberCachedTitle(cached.title, for: topic.id)
+            return true
+        }
+        fetchTask?.cancel()
+        fetchTask = nil
+        let request = UUID()
         latest = request
         if visibleURL != url {
             phase = session.cachedThread(at: url).map(Phase.ready) ?? .loading
@@ -662,24 +937,79 @@ final class ForumReaderState: ObservableObject {
         } else if case .failed = phase { phase = .loading }
         isLoading = true
         refreshIssue = nil
-        defer { if latest == request && !Task.isCancelled { isLoading = false } }
-        let access = session.accessRevision
-        do {
-            let (thread, loader): (ForumThread, ForumWebPage)
-            if let fetch { (thread, loader) = try await fetch(url, session) }
-            else { (thread, loader) = try await Self.fetch(url, session: session) }
-            guard latest == request, !Task.isCancelled, access == session.accessRevision else { return }
-            page = loader
-            session.cacheThread(thread, at: url)
-            session.rememberTitle(thread.title, for: topic.id)
-            if case .ready(let existing) = phase, existing == thread { return }
-            phase = .ready(thread)
-        } catch {
-            guard !Task.isCancelled, latest == request, access == session.accessRevision else { return }
-            let issue = error as? ForumPageError ?? .network
-            if case .ready = phase, issue == .network || issue == .timedOut { refreshIssue = issue }
-            else { page = nil; phase = .failed(issue) }
+        defer {
+            if latest == request {
+                isLoading = false
+                fetchTask = nil
+            }
         }
+        let access = session.accessRevision
+        let revision = session.threadRevision(topic.id)
+        let operation = Task { @MainActor in
+            let titleRead = session.beginTitleRead()
+            let result: (ForumThread, ForumWebPage)
+            if let fetch { result = try await fetch(url, session) }
+            else { result = try await Self.fetch(url, session: session) }
+            return (result.0, result.1, titleRead)
+        }
+        fetchTask = operation
+        do {
+            let (thread, loader, titleRead) = try await withTaskCancellationHandler {
+                try await operation.value
+            } onCancel: { operation.cancel() }
+            guard latest == request, !Task.isCancelled, !operation.isCancelled,
+                  access == session.accessRevision else { return false }
+            guard revision == session.threadRevision(topic.id) else {
+                settleInvalidatedRead()
+                return false
+            }
+            page = loader
+            pageRevision = revision
+            pageUpdated = session.threadReadTime
+            session.cacheThread(thread, at: url)
+            session.rememberTitle(thread.title, for: topic.id, request: titleRead)
+            if case .ready(let existing) = phase, existing == thread { return true }
+            phase = .ready(thread)
+            return true
+        } catch {
+            guard !Task.isCancelled, !operation.isCancelled, latest == request,
+                  access == session.accessRevision else { return false }
+            guard revision == session.threadRevision(topic.id) else {
+                settleInvalidatedRead()
+                return false
+            }
+            let issue = error as? ForumPageError ?? .network
+            pageUpdated = nil
+            if case .ready = phase, issue == .network || issue == .timedOut || issue == .changed { refreshIssue = issue }
+            else {
+                if issue == .missing || issue == .signInRequired || issue == .verification { session.invalidateThread(topic.id) }
+                page = nil
+                phase = .failed(issue)
+            }
+            return false
+        }
+    }
+
+    /// Cache-only revisits do not retain WebKit. Prepare one page only when an
+    /// actual interaction needs its authenticated script context.
+    func preparePage(_ topic: Topic, session: ForumSession, force: Bool = false, fetch: Fetch? = nil) async -> ForumWebPage? {
+        guard !Task.isCancelled, !isLoading else { return nil }
+        if !force, let page, visibleURL == Forum.pageURL(topic.url),
+           refreshIssue == nil, pageRevision == session.threadRevision(topic.id),
+           session.threadIsFresh(since: pageUpdated) { return page }
+        let access = session.accessRevision
+        let loaded = await load(topic, session: session, force: true, fetch: fetch)
+        guard loaded, !Task.isCancelled, access == session.accessRevision, !isLoading,
+              refreshIssue == nil, pageRevision == session.threadRevision(topic.id),
+              session.threadIsFresh(since: pageUpdated) else { return nil }
+        return page
+    }
+
+    private func settleInvalidatedRead() {
+        page = nil
+        pageUpdated = nil
+        if case .ready = phase { refreshIssue = .changed }
+        else { phase = .failed(.changed) }
     }
 
     static func fetch(_ url: URL, floor: String? = nil, session: ForumSession) async throws -> (ForumThread, ForumWebPage) {
@@ -710,16 +1040,125 @@ final class ForumReaderState: ObservableObject {
         }
         if loader.status == 401 { throw ForumPageError.signInRequired }
         if loader.status == 403 { throw signedIn == false ? ForumPageError.signInRequired : ForumPageError.missing }
-        let result = try await loader.webView.callAsyncJavaScript(ForumPageScript.extract,
-            arguments: ["onlyFloor": floor ?? ""], in: nil, contentWorld: .defaultClient)
         try Task.checkCancellation()
         guard revision == session.accessRevision else { throw CancellationError() }
+        let sourceURL = Forum.pageURL(actual)
+        // NodeSeek keeps the complete ANSI fences in its own page-world config
+        // even when an inactive xterm viewport has never painted. Read only a
+        // bounded terminal DTO; keep account data out of the reader world.
+        let terminalSources = (try? await loader.webView.callAsyncJavaScript(ForumPageScript.terminalMarkdown,
+            arguments: ["expectedURL": sourceURL.absoluteString, "onlyFloor": floor ?? ""],
+            in: nil, contentWorld: .page)) as? String ?? ""
+        try Task.checkCancellation()
+        guard revision == session.accessRevision else { throw CancellationError() }
+        guard loader.webView.url.map(Forum.pageURL) == sourceURL else { throw ForumPageError.changed }
+        let result = try await loader.webView.callAsyncJavaScript(ForumPageScript.extract,
+            arguments: ["onlyFloor": floor ?? "", "terminalSources": terminalSources], in: nil, contentWorld: .defaultClient)
+        try Task.checkCancellation()
+        guard revision == session.accessRevision else { throw CancellationError() }
+        guard loader.webView.url.map(Forum.pageURL) == sourceURL else { throw ForumPageError.changed }
         guard let json = result as? String else { throw ForumPageError.changed }
-        if let thread = try? JSONDecoder().decode(ForumThread.self, from: Data(json.utf8)) {
-            return (thread, loader)
-        } else if json == #"{"error":"missing"}"# {
-            throw signedIn == false ? ForumPageError.signInRequired : ForumPageError.missing
-        } else { throw ForumPageError.changed }
+        let thread: ForumThread
+        do { thread = try await ForumThreadDecoding.decode(json) }
+        catch is CancellationError { throw CancellationError() }
+        catch {
+            if json == #"{"error":"missing"}"# {
+                throw signedIn == false ? ForumPageError.signInRequired : ForumPageError.missing
+            }
+            throw ForumPageError.changed
+        }
+        try Task.checkCancellation()
+        guard revision == session.accessRevision else { throw CancellationError() }
+        guard loader.webView.url.map(Forum.pageURL) == sourceURL else { throw ForumPageError.changed }
+        // The native reader already has the document; stop hidden subresource loads.
+        loader.webView.stopLoading()
+        return (thread, loader)
+    }
+}
+
+/// A deterministic retention budget for parsed value types, not a process-RSS
+/// measurement. Include string storage and per-element overhead; stop counting
+/// once the cache budget is exceeded rather than traversing an oversized report.
+enum ForumThreadCacheCost {
+    static let limit = 16 * 1024 * 1024
+
+    static func estimate(_ thread: ForumThread) -> Int {
+        var remaining = limit + 1
+        func add(_ value: Int) { remaining -= min(remaining, value) }
+        func text(_ value: String?) {
+            guard let value, remaining > 0 else { return }
+            add(64)
+            add(min(limit + 1, value.utf8.count) * 2)
+        }
+        func blocks(_ items: [ForumBlock]) {
+            for block in items {
+                guard remaining > 0 else { return }
+                add(192)
+                text(block.kind); text(block.text); text(block.url?.absoluteString); text(block.language)
+                for row in block.rows ?? [] {
+                    add(32)
+                    for cell in row {
+                        text(cell)
+                        if remaining == 0 { return }
+                    }
+                    if remaining == 0 { return }
+                }
+                for line in block.terminal ?? [] {
+                    add(32)
+                    for span in line {
+                        add(96)
+                        text(span.text); text(span.foreground); text(span.background)
+                        if remaining == 0 { return }
+                    }
+                }
+                for tab in block.tabs ?? [] {
+                    add(64); text(tab.label); blocks(tab.blocks)
+                    if remaining == 0 { return }
+                }
+                for item in block.items ?? [] {
+                    add(64); text(item.marker); blocks(item.blocks)
+                    if remaining == 0 { return }
+                }
+            }
+        }
+        func floor(_ item: ForumFloor) {
+            add(256)
+            text(item.id); text(item.author); text(item.avatar?.absoluteString)
+            text(item.date); text(item.dateLabel); text(item.signature)
+            for tag in item.tags ?? [] { text(tag) }
+            blocks(item.blocks)
+        }
+        add(256)
+        text(thread.title); text(thread.category); text(thread.replyRestriction)
+        if let root = thread.root { floor(root) }
+        for reply in thread.replies {
+            guard remaining > 0 else { break }
+            floor(reply)
+        }
+        for page in thread.pages {
+            guard remaining > 0 else { break }
+            add(32); text(page.url.absoluteString)
+        }
+        return limit + 1 - remaining
+    }
+}
+
+enum ForumThreadDecoding {
+    static func decode(_ json: String) async throws -> ForumThread {
+        try Task.checkCancellation()
+        let work = Task.detached(priority: .userInitiated) {
+            try Task.checkCancellation()
+            let thread = try JSONDecoder().decode(ForumThread.self, from: Data(json.utf8))
+            try Task.checkCancellation()
+            return thread
+        }
+        return try await withTaskCancellationHandler {
+            let thread = try await work.value
+            try Task.checkCancellation()
+            return thread
+        } onCancel: {
+            work.cancel()
+        }
     }
 }
 
@@ -730,6 +1169,7 @@ final class ForumWebPage: NSObject, WKNavigationDelegate, WKUIDelegate {
     private var timeout: Task<Void, Never>?
     private var documentProbe: Task<Void, Never>?
     private var expected: WKNavigation?
+    private var readID: UUID?
     private(set) var status: Int?
     private(set) var challenged = false
     var didSettle: (() -> Void)?
@@ -738,6 +1178,7 @@ final class ForumWebPage: NSObject, WKNavigationDelegate, WKUIDelegate {
 
     init(dataStore: WKWebsiteDataStore, captureTerminals: Bool = false) {
         let configuration = WKWebViewConfiguration()
+        DeskProxyWebKit.configure(dataStore)
         configuration.websiteDataStore = dataStore
         if captureTerminals {
             configuration.userContentController.addUserScript(WKUserScript(source: ForumPageScript.captureTerminals,
@@ -747,10 +1188,16 @@ final class ForumWebPage: NSObject, WKNavigationDelegate, WKUIDelegate {
         super.init()
         webView.navigationDelegate = self
         webView.uiDelegate = self
+        DeskProxyWebKit.register(webView)
     }
 
     func read(_ url: URL) async throws {
         guard Forum.contains(url) else { throw ForumPageError.missing }
+        if continuation != nil { finish(.failure(CancellationError())); webView.stopLoading() }
+        let requestID = UUID()
+        readID = requestID
+        status = nil
+        challenged = false
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (waiter: CheckedContinuation<Void, Error>) in
                 guard !Task.isCancelled else { waiter.resume(throwing: CancellationError()); return }
@@ -765,6 +1212,7 @@ final class ForumWebPage: NSObject, WKNavigationDelegate, WKUIDelegate {
             }
         } onCancel: {
             Task { @MainActor [weak self] in
+                guard self?.readID == requestID else { return }
                 self?.finish(.failure(CancellationError()))
                 self?.webView.stopLoading()
             }
@@ -794,6 +1242,7 @@ final class ForumWebPage: NSObject, WKNavigationDelegate, WKUIDelegate {
         documentProbe?.cancel()
         documentProbe = nil
         expected = nil
+        readID = nil
         let waiter = continuation
         continuation = nil
         waiter?.resume(with: result)
@@ -869,9 +1318,11 @@ struct ForumAccessSheet: View {
                 }
                 Spacer()
                 Button("关闭") { session.finishAccess(nil) }.keyboardShortcut(.cancelAction)
+                    .buttonStyle(DeskButtonStyle())
             }
             .padding(15)
-            Divider()
+            .deskGlass(in: RoundedRectangle(cornerRadius: 16), solid: Color(nsColor: .windowBackgroundColor))
+            .padding(10)
             ForumAccessWebView(request: request, session: session)
         }
         .frame(idealWidth: 710, idealHeight: 590)

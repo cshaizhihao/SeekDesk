@@ -99,14 +99,14 @@ actor ValueExchangeRates {
 
     private static let marketURL = URL(string: "https://www.live-rates.com/rates")!
     private static let hourlyURL = URL(string: "https://api.exchangerate.fun/latest?base=USD")!
-    private static let session: URLSession = {
+    private static let session: DeskProxySession = {
         let config = URLSessionConfiguration.ephemeral
         config.httpShouldSetCookies = false
         config.httpCookieStorage = nil
         config.urlCredentialStorage = nil
         config.urlCache = nil
         config.timeoutIntervalForResource = 8
-        return URLSession(configuration: config)
+        return DeskProxyNetwork.shared.makeSession(configuration: config)
     }()
 
     func latest(_ pair: ValueCurrencyPair, force: Bool = false) async -> ValueExchangeQuote? {

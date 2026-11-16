@@ -17,15 +17,32 @@ struct ForumBlocksView: View, Equatable {
 
     @ViewBuilder private func block(_ block: ForumBlock) -> some View {
         switch block.kind {
+        case "list":
+            if let items = block.items {
+                let font = NSFont.systemFont(ofSize: palette.readingSize)
+                let width = items.reduce(palette.readingSize * 1.25) { width, item in
+                    max(width, ((item.marker + " ") as NSString).size(withAttributes: [.font: font]).width)
+                }
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(items.indices, id: \.self) { index in
+                        HStack(alignment: .top, spacing: 6) {
+                            Text(items[index].marker + " ").font(.system(size: palette.readingSize))
+                                .lineLimit(1).minimumScaleFactor(0.5)
+                                .frame(width: width, alignment: .trailing)
+                            ForumBlocksView(blocks: items[index].blocks, palette: palette, reportKind: reportKind)
+                        }
+                    }
+                }
+            }
         case "image", "sticker":
             if let url = block.url {
                 ForumImageView(url: url, label: block.text, sticker: block.kind == "sticker",
-                               report: reportKind != nil, reportKind: reportKind ?? .tq)
+                               report: reportKind != nil, reportKind: reportKind ?? .tq, sourceSize: block.imageSize)
             }
         case "tabs":
             if let tabs = block.tabs {
                 let kind = reportKind ?? ForumReportKind.classify(labels: tabs.map(\.label), hasTerminal: tabs.contains { item in
-                    item.blocks.contains { $0.kind == "terminal" || $0.kind == "terminalUnavailable" }
+                    item.blocks.contains { $0.hasTerminal }
                 })
                 ForumTabPanel(labels: tabs.map(\.label), palette: palette, fitsReport: kind != nil) { index in
                     ForumBlocksView(blocks: tabs[index].blocks, palette: palette, reportKind: kind).equatable()
@@ -48,7 +65,7 @@ struct ForumBlocksView: View, Equatable {
                 .background(palette.surface, in: RoundedRectangle(cornerRadius: 6))
         case "code":
             ScrollView(.horizontal) {
-                Text(block.text).font(.system(size: 12, design: .monospaced))
+                Text(block.text).font(.system(size: max(12, palette.readingSize * 0.9), design: .monospaced))
                     .fixedSize(horizontal: true, vertical: false).padding(10)
             }
             .background(palette.surface, in: RoundedRectangle(cornerRadius: 6))
@@ -70,7 +87,7 @@ struct ForumBlocksView: View, Equatable {
                     GridRow {
                         ForEach(rows[index].indices, id: \.self) { column in
                             Text(rows[index][column])
-                                .font(.system(size: 12, weight: index == 0 ? .semibold : .regular))
+                                .font(.system(size: max(12, palette.readingSize - 1), weight: index == 0 ? .semibold : .regular))
                                 .fixedSize(horizontal: false, vertical: true)
                                 .frame(minWidth: 62, maxWidth: 240, alignment: .leading)
                                 .padding(8)
@@ -86,8 +103,7 @@ struct ForumBlocksView: View, Equatable {
     }
 
     private func richText(_ value: String, heading: Bool = false) -> some View {
-        let options = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
-        return Text((try? AttributedString(markdown: value, options: options)) ?? AttributedString(value))
+        Text(DeskMarkdownText.inline(value))
             .font(.system(size: palette.readingSize + (heading ? 3 : 0), weight: heading ? .semibold : .regular))
             .lineSpacing(5).fixedSize(horizontal: false, vertical: true)
     }
@@ -99,7 +115,6 @@ struct ForumTabPanel<Content: View>: View {
     var fitsReport = false
     @ViewBuilder let content: (Int) -> Content
     @StateObject private var state = Selection()
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         let selectedIndex = labels.indices.contains(state.index) ? state.index : 0
@@ -135,24 +150,15 @@ struct ForumTabPanel<Content: View>: View {
     private func tabHeader(_ selectedIndex: Int) -> some View {
         VStack(spacing: 0) {
             ScrollView(.horizontal) {
-                HStack(spacing: 4) {
-                    ForEach(labels.indices, id: \.self) { index in
-                        let selected = selectedIndex == index
-                        Button {
-                            state.index = index
-                        } label: {
-                            Text(labels[index]).font(.caption.weight(selected ? .semibold : .medium))
-                                .foregroundStyle(selected ? palette.accent : Color.secondary)
-                                .padding(.horizontal, 9).frame(height: 27)
-                                .background(selected ? palette.selection : .clear, in: RoundedRectangle(cornerRadius: 5))
-                                .animation(reduceMotion ? nil : DeskMotion.selection, value: selected)
-                        }
-                        .buttonStyle(DeskButtonStyle())
-                        .accessibilityAddTraits(selected ? .isSelected : [])
-                    }
-                }.padding(6)
+                DeskGlassPicker(values: Array(labels.indices), selection: Binding(
+                        get: { selectedIndex }, set: { state.index = $0 }),
+                                tint: palette.accent, solid: palette.selection,
+                                compact: true, controlHeight: 27) { index, _ in
+                    Text(labels[index]).font(.caption.weight(.medium)).padding(.horizontal, 1)
+                }
+                .padding(6)
             }
-            .background(palette.chrome)
+            .background(palette.chrome.opacity(0.45))
             Rectangle().fill(palette.line).frame(height: 1)
         }
     }

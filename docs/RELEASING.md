@@ -33,6 +33,8 @@ export SEEKDESK_NOTARY_PROFILE='SeekDesk-notary'
 
 配置 `SEEKDESK_FEED_URL`（HTTPS）及 `SEEKDESK_UPDATE_PUBLIC_KEY`（32 字节 Ed25519 公钥的 Base64）后，`release` 模式启用 Sparkle。私钥保存在发行环境，使用 Sparkle 的 `generate_appcast` 为最终产物生成签名更新源，验证从旧版到新版的完整升级后再公开 feed。
 
-V1.0.0 没有生产 appcast 或更新签名配置，使用 GitHub Releases 手动更新。
+已发布的 V1.0.0 需要手动安装一次含有更新功能的 Flutter 版本。后续更新使用 GitHub Release 内的 `appcast.xml` 和经过 Ed25519 签名的 ZIP。应用包仍可使用临时签名。
+
+构建发行用 Flutter 版本后，运行 `bash Flutter/scripts/package-update.sh`。脚本从发布机的私有密钥文件签名，默认读取 `~/.config/seekdesk/update-signing.key`，也可以用 `SEEKDESK_UPDATE_SIGNING_KEY_FILE` 指定路径。私钥只保留在发行环境，应用内只包含公钥。每次发行须提升构建号，将 `SeekDesk-版本号-macOS-update.zip` 和 `appcast.xml` 连同原有安装包上传到同一个 GitHub Release，上传完整后再公开该发布。
 
 参考：[Apple Developer ID](https://developer.apple.com/developer-id/)、[Apple 公证](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution)、[Sparkle 发行](https://sparkle-project.org/documentation/publishing/)。

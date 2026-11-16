@@ -1,0 +1,5 @@
+// Opt-in, isolated Profile-only performance host. The build script fixes the
+// Dart entry point and refuses Release/local-delivery combinations.
+SEEKDESK_PRODUCT_NAME = SeekDesk Benchmark
+SEEKDESK_BUNDLE_IDENTIFIER = com.seekdesk.flutter-benchmark
+SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) SEEKDESK_FLUTTER SEEKDESK_PROFILE_FIXTURE

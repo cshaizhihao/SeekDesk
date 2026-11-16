@@ -130,14 +130,22 @@ struct Topic: Identifiable, Codable, Equatable {
 }
 
 struct ReadingSession: Codable {
+    struct ClosedTopic: Codable, Identifiable {
+        var topic: Topic
+        let index: Int
+        var id: String { topic.id }
+    }
     private(set) var topics: [Topic] = []
     private(set) var selection: String?
     private var recent: [String] = []
+    private var closed: [ClosedTopic]?
+    var closedTopics: [ClosedTopic] { closed ?? [] }
 
     var selectedTopic: Topic? { topics.first { $0.id == selection } }
 
     mutating func open(_ url: URL, title: String, background: Bool, explicitLocation: Bool = false) {
         guard let id = Forum.topicID(url) else { return }
+        closed?.removeAll { $0.id == id }
         if let index = topics.firstIndex(where: { $0.id == id }) {
             // List rows reuse the open tab. Pasted links navigate to the requested page or floor.
             if explicitLocation || url.fragment?.isEmpty == false {
@@ -160,11 +168,52 @@ struct ReadingSession: Codable {
 
     mutating func close(_ id: String) {
         guard let index = topics.firstIndex(where: { $0.id == id }) else { return }
-        topics.remove(at: index)
+        var topic = topics.remove(at: index)
+        topic.draft = "" // Drafts have separate account-scoped storage.
+        var history = closedTopics.filter { $0.id != id }
+        history.append(ClosedTopic(topic: topic, index: index))
+        closed = Array(history.suffix(20))
         recent.removeAll { $0 == id }
         guard selection == id else { return }
         selection = nil
         if let previous = recent.last ?? topics.last?.id { select(previous) }
+    }
+
+    mutating func reopen(_ id: String? = nil) -> Bool {
+        var history = closedTopics
+        guard let index = id.flatMap({ wanted in history.lastIndex { $0.id == wanted } }) ?? (id == nil ? history.indices.last : nil) else { return false }
+        let entry = history.remove(at: index)
+        closed = history
+        guard Forum.topicID(entry.topic.url) == entry.id else { return false }
+        if !topics.contains(where: { $0.id == entry.id }) {
+            topics.insert(entry.topic, at: min(max(0, entry.index), topics.count))
+        }
+        select(entry.id)
+        return true
+    }
+
+    mutating func closeAll() {
+        let entries = topics.enumerated().map { index, original in
+            var topic = original
+            topic.draft = ""
+            return ClosedTopic(topic: topic, index: index)
+        }
+        // Recover the active tab first, then the others in their original order.
+        let closing = entries.reversed().filter { $0.id != selection } + entries.filter { $0.id == selection }
+        let openIDs = Set(topics.map(\.id))
+        closed = Array((closedTopics.filter { !openIDs.contains($0.id) } + closing).suffix(20))
+        topics.removeAll()
+        recent.removeAll()
+        selection = nil
+    }
+
+    mutating func clearPrivilegedMetadata() {
+        for index in topics.indices { topics[index].title = ""; topics[index].preview = nil; topics[index].draft = "" }
+        closed = closed?.map { entry in
+            var entry = entry
+            entry.topic.title = ""; entry.topic.preview = nil; entry.topic.draft = ""
+            return entry
+        }
     }
 
     mutating func move(_ id: String, to target: String) -> Bool {

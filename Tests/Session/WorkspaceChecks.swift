@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 
 @MainActor
 func checkBlockConfirmation() {
@@ -71,7 +72,7 @@ func checkWorkspace() async {
     precondition(workspace.session.selectedTopic?.url.fragment == "comment-27")
     precondition(workspace.session.selectedTopic?.preview == c)
     let restored = Workspace(defaults: defaults)
-    precondition(!restored.showReader && restored.session.selectedTopic?.id == c.id)
+    precondition(restored.showReader && restored.session.selectedTopic?.id == c.id)
     restored.select(c.id)
     precondition(restored.showReader && restored.closeCurrentTab() && !restored.showReader)
 
@@ -175,6 +176,7 @@ func checkWorkspace() async {
         if url == Board.home.latestURL(order: .replies) { return ForumListingPage(posts: [b], next: nil) }
         throw URLError(.badURL)
     })
+    findOlder.choose(.home)
     findOlder.chooseFeedOrder(.replies)
     await findOlder.refresh()
     precondition(findOlder.posts == [b])
@@ -268,6 +270,259 @@ func checkWorkspace() async {
     precondition(directory.searchHistory.count == 1 && directory.searchHistory[0].query == "尚未提交的搜索文字")
     print("Passed isolated search history clearing, persistence and new history checks.")
     print("Passed refresh and keyboard focus, tab shortcuts, pasted links, and offline cache checks.")
+    await checkWorkspaceDerivedResults()
+    await checkWorkspaceSearchDraft()
+    checkWorkspaceNavigationPersistence()
+}
+
+@MainActor
+private func checkWorkspaceNavigationPersistence() {
+    let suite = "SeekDesk.tests.navigation-persistence.\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    defer { defaults.removePersistentDomain(forName: suite) }
+    func restored() -> Workspace {
+        Workspace(defaults: defaults, fetchFeed: { preconditionFailure("Navigation restoration must not fetch a feed") })
+    }
+    let review = Board.sections.first { $0.id == "review" }!
+    let firstURL = Forum.home.appendingPathComponent("post-801-3")
+    let secondURL = Forum.home.appendingPathComponent("post-802-2")
+    var saved = ReadingSession()
+    saved.open(firstURL, title: "First retained tab", background: false)
+    saved.update("801") { $0.scroll = 317.5 }
+    saved.open(secondURL, title: "Second retained tab", background: true)
+    saved.update("802") { $0.scroll = 92.25 }
+    saved.open(Forum.home.appendingPathComponent("post-803-1"), title: "Closed tab", background: true)
+    saved.close("803")
+    defaults.set(try! JSONEncoder().encode(saved), forKey: "readingSession.v1")
+    defaults.set(true, forKey: "reading.showReader")
+    let draft = Data("unrelated account-scoped draft fixture".utf8)
+    defaults.set(draft, forKey: "forum.drafts.v1.101")
+
+    func assertTabs(_ workspace: Workspace) {
+        precondition(workspace.session.topics == saved.topics)
+        precondition(workspace.session.selection == saved.selection)
+        precondition(workspace.session.closedTopics.map(\.topic) == saved.closedTopics.map(\.topic))
+        precondition(defaults.data(forKey: "forum.drafts.v1.101") == draft)
+    }
+
+    let missing = restored()
+    precondition(missing.board == .home && missing.destination == .board(.home) && missing.showReader)
+    assertTabs(missing)
+    let invalidBoards: [Any] = ["not-a-board", "https://www.nodeseek.com/categories/review", 123, true, ["review"]]
+    for value in invalidBoards {
+        defaults.set(value, forKey: "workspace.lastBoard")
+        let invalid = restored()
+        precondition(invalid.board == .home && invalid.destination == .board(.home))
+        precondition(invalid.searchScope.isEmpty && invalid.showReader)
+        assertTabs(invalid)
+    }
+    for board in [Board.home, Board.award] + Board.sections {
+        defaults.set(board.id, forKey: "workspace.lastBoard")
+        let workspace = restored()
+        precondition(workspace.board == board && workspace.destination == .board(board))
+        precondition(workspace.searchScope == Set(board.categoryID.map { [$0] } ?? []))
+        assertTabs(workspace)
+        workspace.showSettings()
+        workspace.returnToForum()
+        precondition(workspace.destination == .board(board) && workspace.showReader)
+        assertTabs(workspace)
+    }
+    print("Passed valid and invalid board restoration with retained tabs, selection, scroll and drafts.")
+
+    let workspace = restored()
+    workspace.choose(review)
+    precondition(defaults.string(forKey: "workspace.lastBoard") == "review")
+    precondition(!workspace.showReader && !defaults.bool(forKey: "reading.showReader"))
+    let overview = restored()
+    precondition(overview.destination == .board(review) && !overview.showReader)
+    assertTabs(overview)
+
+    workspace.select("801")
+    precondition(workspace.showReader && defaults.bool(forKey: "reading.showReader"))
+    workspace.searchText = "fixture search"
+    workspace.searchScope = [review.id]
+    workspace.search()
+    precondition(workspace.board == review && !workspace.showReader)
+    precondition(!restored().showReader && defaults.string(forKey: "workspace.lastBoard") == review.id)
+    assertTabs(restored())
+
+    workspace.searchText = firstURL.absoluteString
+    workspace.search()
+    precondition(workspace.showReader && restored().showReader)
+    precondition(restored().session.selectedTopic?.url == firstURL)
+    let beforeInvalid = defaults.data(forKey: "readingSession.v1")
+    workspace.choose(Board(id: "unknown", title: "Invalid", icon: "questionmark"))
+    precondition(workspace.board == review && workspace.showReader)
+    precondition(defaults.string(forKey: "workspace.lastBoard") == review.id)
+    precondition(defaults.data(forKey: "readingSession.v1") == beforeInvalid)
+    print("Passed immediate overview persistence, same-board search, topic-link reading and invalid selection rejection.")
+}
+
+@MainActor
+private func checkWorkspaceSearchDraft() async {
+    let suite = "SeekDesk.tests.search-draft.\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let post = FeedPost(id: "801", url: Forum.home.appendingPathComponent("post-801-1"),
+                        title: "server fixture", author: "作者", category: "tech", published: nil, summary: "")
+    let workspace = Workspace(defaults: defaults, fetchFeed: { [post] })
+    await workspace.refresh()
+    workspace.beginSearch()
+    var workspacePublishes = 0
+    var draftPublishes = 0
+    let workspaceObservation = workspace.objectWillChange.sink { workspacePublishes += 1 }
+    let draftObservation = workspace.searchDraft.objectWillChange.sink { draftPublishes += 1 }
+
+    // Existing APIs, including Set writeback, still edit the observable draft.
+    workspace.searchText = "first draft"
+    workspace.searchScope.insert("tech")
+    workspace.searchKind = .posts
+    precondition(workspacePublishes == 0 && draftPublishes == 3)
+    precondition(workspace.searchDraft.text == "first draft")
+    precondition(workspace.searchDraft.scope == ["tech"] && workspace.searchDraft.kind == .posts)
+    precondition(workspace.query.isEmpty && workspace.filteredPosts == [post])
+
+    // Direct panel bindings and the compatibility properties share one value.
+    workspace.searchDraft.text = "server"
+    workspace.searchDraft.scope = []
+    workspace.searchDraft.kind = .all
+    precondition(workspacePublishes == 0 && draftPublishes == 6)
+    precondition(workspace.searchText == "server" && workspace.searchScope.isEmpty && workspace.searchKind == .all)
+    let revision = workspace.searchRevision
+    workspace.search()
+    precondition(workspacePublishes > 0 && workspace.searchRevision == revision + 1)
+    precondition(workspace.query == "server" && workspace.appliedSearchScope.isEmpty && workspace.appliedSearchKind == .all)
+    precondition(workspace.filteredPosts == [post] && !workspace.showingSearch)
+    withExtendedLifetime((workspaceObservation, draftObservation)) {}
+    print("Passed search draft observation isolation, compatibility writeback and submitted search notifications.")
+}
+
+@MainActor
+private func checkWorkspaceDerivedResults() async {
+    let suite = "SeekDesk.tests.derived-results.\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let review = Board.sections.first { $0.id == "review" }!
+    let tech = Board.sections.first { $0.id == "tech" }!
+    func post(_ id: String, _ title: String, category: String = "review") -> FeedPost {
+        FeedPost(id: id, url: Forum.home.appendingPathComponent("post-\(id)-1"),
+                 title: title, author: "作者", category: category, published: nil, summary: "")
+    }
+    let oldCopy = post("701", "server old title")
+    let currentCopy = post("701", "unrelated current title")
+    let publicPost = post("702", "server public")
+    let technical = post("703", "server technical", category: "tech")
+    let privatePost = post("704", "server privileged")
+    let newPublic = post("705", "server new public")
+    let remoteCopy = post("704", "server remote result")
+    let remoteOlder = post("706", "server older remote")
+    let replyOrder = post("707", "server latest reply")
+    var rss = [oldCopy, publicPost, technical]
+    var pages: [URL: ForumListingPage] = [:]
+    let workspace = Workspace(defaults: defaults, fetchFeed: { rss }, fetchPage: { url in
+        guard let result = pages[url] else { throw URLError(.notConnectedToInternet) }
+        return result
+    }, fetchPeople: { _ in [] })
+
+    // A failed page fetch uses RSS; replacing that source must invalidate a
+    // previously read list, including its board-filtered form.
+    await workspace.refresh()
+    precondition(workspace.filteredPosts == rss)
+    rss.append(newPublic)
+    await workspace.refresh()
+    precondition(workspace.filteredPosts == rss)
+    workspace.choose(review)
+    precondition(workspace.filteredPosts == [oldCopy, publicPost, newPublic])
+    pages[review.latestURL] = ForumListingPage(posts: [currentCopy, privatePost], next: nil)
+    await workspace.refresh()
+    precondition(workspace.filteredPosts == [currentCopy, privatePost])
+
+    workspace.searchText = "server"
+    workspace.searchKind = .posts
+    workspace.search()
+    // Current category data is authoritative. Its nonmatching updated title
+    // must not reappear through an older matching RSS copy of the same ID.
+    precondition(workspace.filteredPosts == [privatePost, publicPost, newPublic])
+    precondition(workspace.filteredPosts.map(\.id).count == Set(workspace.filteredPosts.map(\.id)).count)
+    workspace.searchText = "draft only"
+    workspace.searchScope = ["tech"]
+    workspace.searchKind = .people
+    precondition(workspace.filteredPosts == [privatePost, publicPost, newPublic])
+
+    let searchURL = Forum.search("server")
+    let searchNext = Forum.searchPage(Forum.home.appendingPathComponent("search/page-2"), query: "server")!
+    pages[searchURL] = ForumListingPage(posts: [remoteCopy], next: searchNext)
+    pages[searchNext] = ForumListingPage(posts: [remoteCopy, remoteOlder], next: nil)
+    await workspace.refresh()
+    precondition(workspace.filteredPosts == [remoteCopy, publicPost, newPublic])
+    await workspace.loadOlder()
+    precondition(workspace.filteredPosts == [remoteCopy, remoteOlder, publicPost, newPublic])
+    workspace.clearSearch()
+    precondition(workspace.filteredPosts == [currentCopy, privatePost])
+
+    workspace.chooseFeedOrder(.replies)
+    precondition(workspace.filteredPosts == [oldCopy, publicPost, newPublic])
+    let olderReview = review.url.appendingPathComponent("page-2")
+    pages[review.latestURL(order: .replies)] = ForumListingPage(posts: [replyOrder], next: olderReview)
+    pages[review.nextListingURL(olderReview, order: .replies)!] = ForumListingPage(posts: [privatePost], next: nil)
+    await workspace.refresh()
+    precondition(workspace.filteredPosts == [replyOrder])
+    await workspace.loadOlder()
+    precondition(workspace.filteredPosts == [replyOrder, privatePost])
+    workspace.choose(tech)
+    precondition(workspace.filteredPosts == [technical])
+    pages[tech.latestURL(order: .replies)] = ForumListingPage(posts: [technical], next: nil)
+    await workspace.refresh()
+    workspace.choose(review)
+    precondition(workspace.filteredPosts == [replyOrder, privatePost])
+    workspace.showPlugins()
+    precondition(workspace.filteredPosts == [replyOrder, privatePost])
+    workspace.returnToForum()
+    precondition(workspace.filteredPosts == [replyOrder, privatePost])
+
+    // Reusing a query with a different committed scope or result kind must
+    // replace the derived list, while draft controls above leave it intact.
+    workspace.searchText = "server"
+    workspace.searchScope = ["tech"]
+    workspace.searchKind = .posts
+    workspace.search()
+    precondition(workspace.filteredPosts == [technical])
+    workspace.searchScope = ["review"]
+    workspace.search()
+    precondition(workspace.filteredPosts == [replyOrder, privatePost, oldCopy, publicPost, newPublic])
+    workspace.searchKind = .people
+    workspace.search()
+    precondition(workspace.filteredPosts.isEmpty)
+    workspace.searchKind = .posts
+    workspace.searchText = "nothing-matches-this-query"
+    workspace.search()
+    precondition(workspace.filteredPosts.isEmpty)
+    workspace.searchText = "server"
+    workspace.searchScope = ["review"]
+    workspace.search()
+    await workspace.refresh()
+    precondition(workspace.filteredPosts.contains(remoteCopy))
+    workspace.open(privatePost, background: false)
+    workspace.invalidateForumAccess()
+    precondition(workspace.query.isEmpty && workspace.posts == rss)
+    precondition(workspace.filteredPosts == [oldCopy, publicPost, newPublic])
+    precondition(!workspace.filteredPosts.contains(privatePost) && !workspace.posts.contains(remoteCopy))
+    precondition(workspace.session.selectedTopic?.preview == nil)
+
+    var publishes = 0
+    let observation = workspace.objectWillChange.sink { publishes += 1 }
+    workspace.clearSearch()
+    precondition(publishes == 0)
+    workspace.select(privatePost.id)
+    precondition(publishes == 0 && workspace.showReader)
+    workspace.showList()
+    workspace.select(privatePost.id)
+    precondition(workspace.showReader && workspace.readingReturnURL == privatePost.url)
+    workspace.showPlugins()
+    workspace.select(privatePost.id)
+    precondition(workspace.inForum && workspace.showReader && workspace.readingReturnURL == privatePost.url)
+    withExtendedLifetime(observation) {}
+    print("Passed derived list invalidation, authoritative deduplication, account isolation and no-op navigation checks.")
 }
 
 @MainActor

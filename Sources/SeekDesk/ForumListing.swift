@@ -1,32 +1,104 @@
 import Foundation
+import OSLog
 import WebKit
+
+/// Listing and directory failures use a small, stable vocabulary. Never expose
+/// raw transport descriptions: they can include URLs or authentication data.
+enum ForumListingIssue: String, Error {
+    case verification, signInRequired, missing, changed, timedOut, network, rateLimited
+
+    static func classify(_ error: Error) -> Self? {
+        if error is CancellationError { return nil }
+        if let issue = error as? Self { return issue }
+        if let issue = error as? ForumPageError {
+            switch issue {
+            case .verification: return .verification
+            case .signInRequired: return .signInRequired
+            case .missing: return .missing
+            case .changed: return .changed
+            case .timedOut: return .timedOut
+            case .network: return .network
+            }
+        }
+        if error is DecodingError { return .changed }
+        let underlying = error as NSError
+        if underlying.domain == NSURLErrorDomain {
+            if underlying.code == NSURLErrorCancelled { return nil }
+            if underlying.code == NSURLErrorTimedOut { return .timedOut }
+        }
+        return .network
+    }
+
+    func message(people: Bool = false) -> String {
+        let content = people ? "用户搜索结果" : "帖子列表或搜索结果"
+        switch self {
+        case .verification: return "请先完成 NodeSeek 站点验证，再重试读取\(content)。"
+        case .signInRequired: return "请登录 NodeSeek 后读取\(content)。"
+        case .missing: return "NodeSeek 未返回\(content)，当前页面可能不存在或无权访问。"
+        case .changed: return "暂时无法解析\(content)，页面结构可能已变化。请重试或在浏览器中查看。"
+        case .timedOut: return "读取\(content)超时，请检查网络后重试。"
+        case .network: return "暂时无法读取\(content)，请检查网络后重试。"
+        case .rateLimited: return "NodeSeek 请求过于频繁，请稍后重试读取\(content)。"
+        }
+    }
+}
 
 @MainActor
 enum ForumListing {
+    private static let logger = Logger(subsystem: "cc.seekdesk", category: "ListingRead")
+
     static func fetch(_ url: URL) async throws -> ForumListingPage {
         let page = ForumWebPage(dataStore: .default())
-        try await page.read(url)
-        if page.challenged { throw ForumPageError.verification }
-        if page.webView.url?.path == Forum.signIn.path || page.status == 401 { throw ForumPageError.signInRequired }
-        guard let actual = page.webView.url, Forum.contains(actual), (actual.path == url.path || (url.path.hasPrefix("/search") && actual.path.hasPrefix("/search"))) else {
-            throw ForumPageError.network
+        let started = Date()
+        let kind = url.path.hasPrefix("/search") ? "search" : "listing"
+        var stage = "read"
+        do {
+            try await page.read(url)
+            stage = "response"
+            try validateResponse(status: page.status, challenged: page.challenged, actual: page.webView.url, requested: url)
+            stage = "extract"
+            let result = try await page.webView.callAsyncJavaScript(extract, arguments: [:], in: nil, contentWorld: .defaultClient)
+            guard let json = result as? String else { throw ForumPageError.changed }
+            stage = "decode"
+            let payload = try JSONDecoder().decode(Payload.self, from: Data(json.utf8))
+            let fractional = ISO8601DateFormatter()
+            fractional.formatOptions.insert(.withFractionalSeconds)
+            let standard = ISO8601DateFormatter()
+            var seen = Set<String>()
+            let posts: [FeedPost] = payload.rows.compactMap { row in
+                guard let id = Forum.topicID(row.url), !row.title.isEmpty, seen.insert(id).inserted else { return nil }
+                let avatar = row.avatar.flatMap { Forum.contains($0) && $0.path.hasPrefix("/avatar/") ? $0 : nil }
+                return FeedPost(id: id, url: row.url, title: row.title, author: row.author, category: row.category,
+                    published: fractional.date(from: row.date) ?? standard.date(from: row.date), summary: "", authorID: row.authorID,
+                    readingRank: row.readingRank, featured: row.featured, listedAvatarURL: avatar)
+            }
+            guard payload.rows.isEmpty || !posts.isEmpty else { throw ForumPageError.changed }
+            return ForumListingPage(posts: posts, next: payload.next)
+        } catch {
+            if !Task.isCancelled, let issue = ForumListingIssue.classify(error) {
+                let elapsed = Int(max(0, Date().timeIntervalSince(started)) * 1_000)
+                // Whitelist only bounded diagnostic fields; never interpolate
+                // URL/query, headers, response content or raw Error values.
+                logger.error("kind=\(kind, privacy: .public) stage=\(stage, privacy: .public) status=\(page.status ?? 0) code=\(issue.rawValue, privacy: .public) elapsedMs=\(elapsed)")
+            }
+            throw error
         }
-        let result = try await page.webView.callAsyncJavaScript(extract, arguments: [:], in: nil, contentWorld: .defaultClient)
-        guard let json = result as? String else { throw ForumPageError.changed }
-        let payload = try JSONDecoder().decode(Payload.self, from: Data(json.utf8))
-        let fractional = ISO8601DateFormatter()
-        fractional.formatOptions.insert(.withFractionalSeconds)
-        let standard = ISO8601DateFormatter()
-        var seen = Set<String>()
-        let posts: [FeedPost] = payload.rows.compactMap { row in
-            guard let id = Forum.topicID(row.url), !row.title.isEmpty, seen.insert(id).inserted else { return nil }
-            let avatar = row.avatar.flatMap { Forum.contains($0) && $0.path.hasPrefix("/avatar/") ? $0 : nil }
-            return FeedPost(id: id, url: row.url, title: row.title, author: row.author, category: row.category,
-                published: fractional.date(from: row.date) ?? standard.date(from: row.date), summary: "", authorID: row.authorID,
-                readingRank: row.readingRank, featured: row.featured, listedAvatarURL: avatar)
+    }
+
+    /// Validate the top-level document before a parser can mistake an HTTP
+    /// failure page for empty search results. Kept pure for local fixtures.
+    static func validateResponse(status: Int?, challenged: Bool, actual: URL?, requested: URL) throws {
+        if challenged { throw ForumListingIssue.verification }
+        if actual?.path == Forum.signIn.path || status == 401 { throw ForumListingIssue.signInRequired }
+        guard let status else { throw ForumListingIssue.network }
+        if status == 429 { throw ForumListingIssue.rateLimited }
+        if status == 404 || status == 410 { throw ForumListingIssue.missing }
+        guard (200..<300).contains(status) else { throw ForumListingIssue.network }
+        guard let actual, Forum.contains(actual),
+              actual.path == requested.path ||
+                (requested.path.hasPrefix("/search") && actual.path.hasPrefix("/search")) else {
+            throw ForumListingIssue.network
         }
-        guard payload.rows.isEmpty || !posts.isEmpty else { throw ForumPageError.changed }
-        return ForumListingPage(posts: posts, next: payload.next)
     }
 
     private struct Payload: Decodable {

@@ -1,6 +1,6 @@
 import Foundation
 
-struct ForumThread: Decodable, Equatable {
+struct ForumThread: Codable, Equatable {
     let title: String
     let category: String
     let root: ForumFloor?
@@ -10,7 +10,35 @@ struct ForumThread: Decodable, Equatable {
     let replyRestriction: String?
 }
 
-struct ForumFloor: Decodable, Identifiable, Equatable {
+/// Resolve missing/deleted/filtered floors without sending the reader back to the title.
+enum ForumReadingDestination {
+    static func replies(in thread: ForumThread, authorOnly: Bool) -> [ForumFloor] {
+        guard authorOnly else { return thread.replies }
+        return thread.replies.filter { $0.isAuthor || (thread.root != nil && $0.author == thread.root?.author) }
+    }
+
+    static func anchor(in thread: ForumThread, preferred: String?, fragment: String?, authorOnly: Bool) -> String {
+        let replies = replies(in: thread, authorOnly: authorOnly)
+        let fallback = thread.page == 1 ? "thread-title" : "thread-discussion"
+        let requested = preferred ?? fragment.map { "floor-" + ($0.hasPrefix("comment-") ? String($0.dropFirst(8)) : $0) }
+        guard let requested else { return fallback }
+        if ["thread-title", "thread-discussion"].contains(requested) { return requested }
+        if requested == "floor-0", thread.root != nil { return requested }
+        if replies.contains(where: { $0.readerID == requested }) { return requested }
+        guard requested.hasPrefix("floor-"), let number = Int(requested.dropFirst(6)), number >= 0 else { return fallback }
+        let candidates = replies.compactMap { item -> (Int, String)? in
+            guard let floor = Int(item.id), floor >= 0 else { return nil }
+            return (floor, item.readerID)
+        }
+        return candidates.min { left, right in
+            let leftDistance = abs(left.0 - number)
+            let rightDistance = abs(right.0 - number)
+            return leftDistance == rightDistance ? left.0 < right.0 : leftDistance < rightDistance
+        }?.1 ?? fallback
+    }
+}
+
+struct ForumFloor: Codable, Identifiable, Equatable {
     let id: String
     let author: String
     let authorID: Int?
@@ -39,34 +67,63 @@ struct ForumFloor: Decodable, Identifiable, Equatable {
     }
 }
 
-struct ForumPageLink: Decodable, Identifiable, Equatable {
+struct ForumPageLink: Codable, Identifiable, Equatable {
     let number: Int
     let url: URL
     var id: Int { number }
 }
 
-struct ForumBlock: Decodable, Equatable {
+struct ForumBlock: Codable, Equatable {
     let kind: String
     let text: String
     let url: URL?
     let tabs: [ForumBlockTab]?
     let rows: [[String]]?
     let terminal: [[ForumTerminalSpan]]?
+    var imageSize: ForumImageDimensions? = nil
+    var items: [ForumListItem]? = nil
+    /// Optional and bounded DOM hint, never source code or a highlighter name
+    /// to execute. Old snapshots without this key retain plain-code rendering.
+    var language: String? = nil
+
+    var hasTerminal: Bool {
+        kind == "terminal" || kind == "terminalUnavailable" ||
+            (items ?? []).contains { $0.blocks.contains { $0.hasTerminal } } ||
+            (tabs ?? []).contains { $0.blocks.contains { $0.hasTerminal } }
+    }
 }
 
-struct ForumTerminalSpan: Decodable, Equatable {
+struct ForumListItem: Codable, Equatable {
+    let marker: String
+    let blocks: [ForumBlock]
+}
+
+/// Optional DOM metadata reserves a first-load image's height. It is only a
+/// hint; decoded dimensions and the image cache always take precedence.
+struct ForumImageDimensions: Codable, Equatable {
+    let width: Double
+    let height: Double
+
+    var validatedSize: CGSize? {
+        guard width.isFinite, height.isFinite, width > 0, height > 0,
+              width <= 100_000, height <= 100_000, width * height <= 1_000_000_000 else { return nil }
+        return CGSize(width: width, height: height)
+    }
+}
+
+struct ForumTerminalSpan: Codable, Equatable {
     let text: String
     let foreground: String?
     let background: String?
     let bold: Bool
 }
 
-struct ForumBlockTab: Decodable, Equatable {
+struct ForumBlockTab: Codable, Equatable {
     let label: String
     let blocks: [ForumBlock]
 }
 
-struct ForumReplyResponse: Decodable {
+struct ForumReplyResponse: Codable {
     let success: Bool
     let redirect: String?
     let redirectHash: String?
@@ -124,25 +181,147 @@ enum ForumPageScript {
     const ansiReport = (text, hint = false) => /[\x1b]\[[0-9;:]*m|\u009b[0-9;:]*m/.test(text) ||
         ((hint || /硬件质量体检报告|IP质量体检报告|HardwareQuality|IpQuality|NodeQuality|融合怪|ecs\.sh/i.test(text)) &&
             (text.match(/\[[0-9;:]{1,24}m/g) || []).length >= 3);
+    const explicitANSI = code => Boolean(code.matches?.('code.language-ansi'));
+    const terminalCodeText = node => {
+        if (node.nodeType === Node.TEXT_NODE) return node.textContent || '';
+        if (node.nodeType !== Node.ELEMENT_NODE) return '';
+        const encoded = node.getAttribute('data-ansicode');
+        if (encoded !== null && /^\d{1,3}$/.test(encoded)) {
+            const value = Number(encoded);
+            if (value < 32 || value === 127) return String.fromCharCode(value);
+        }
+        return [...node.childNodes].map(terminalCodeText).join('');
+    };
+    """#
+
+    // This small page-world DTO carries only already-delivered Markdown for
+    // visible floors that contain a terminal. The reader's isolated world cannot
+    // access __config__, and must not receive account metadata from that object.
+    static let terminalMarkdown = #"""
+    const path = /^\/post-(\d+)-(\d+)\/?$/.exec(location.pathname);
+    if (location.protocol !== 'https:' || !['www.nodeseek.com', 'nodeseek.com'].includes(location.host) ||
+        !path || typeof expectedURL !== 'string') return null;
+    let expected;
+    try { expected = new URL(expectedURL); } catch { return null; }
+    if (expected.origin !== location.origin || expected.pathname !== location.pathname ||
+        expected.search !== location.search || expected.username || expected.password) return null;
+    const postID = Number(path[1]), page = Number(path[2]);
+    if (!Number.isSafeInteger(postID) || postID <= 0 || !Number.isSafeInteger(page) || page <= 0) return null;
+    const data = window.__config__?.postData;
+    if (Number(data?.postId) !== postID || !Array.isArray(data?.comments) || data.comments.length > 1000) return null;
+    const main = document.querySelector('#nsk-body-left');
+    if (!main) return null;
+    const requested = typeof onlyFloor === 'string' ? onlyFloor : null;
+    if (requested === null || (requested !== '' && (!/^(0|[1-9]\d*)$/.test(requested) ||
+        !Number.isSafeInteger(Number(requested))))) return null;
+    const items = [...main.querySelectorAll('.nsk-post-wrapper .content-item[id="0"], .comments > .content-item[id]')];
+    const counts = new Map();
+    for (const item of items) counts.set(item.id, (counts.get(item.id) || 0) + 1);
+    const visibleContent = content => {
+        for (let node = content; node; node = node.parentElement) {
+            if (node.matches('[hidden], [aria-hidden="true"]')) return false;
+            const style = getComputedStyle(node);
+            if (style.display === 'none' || style.visibility === 'hidden') return false;
+            if (node === main) return true;
+        }
+        return false;
+    };
+    const floors = new Set(items.filter(item => {
+        if (!/^(0|[1-9]\d*)$/.test(item.id) || counts.get(item.id) !== 1 || (requested && item.id !== requested) ||
+            item.matches('[hidden], [aria-hidden="true"]')) return false;
+        const content = item.querySelector(':scope > .post-content');
+        return visibleContent(content) && Boolean(content.querySelector('.terminal-container, .xterm'));
+    }).map(item => item.id));
+    if (!floors.size) return null;
+    const seen = new Set(), duplicates = new Set(), comments = [];
+    let length = 0;
+    for (const item of data.comments) {
+        const floorIndex = item?.floorIndex;
+        if (!Number.isSafeInteger(floorIndex) || floorIndex < 0 || !floors.has(String(floorIndex))) continue;
+        if (seen.has(floorIndex)) duplicates.add(floorIndex);
+        seen.add(floorIndex);
+        if (typeof item.markdown !== 'string' || item.markdown.length > 512 * 1024) continue;
+        length += item.markdown.length;
+        if (length > 2 * 1024 * 1024 || comments.length >= 100) return null;
+        comments.push({floorIndex, markdown:item.markdown});
+    }
+    return JSON.stringify({postID, page, comments:comments.filter(item => !duplicates.has(item.floorIndex))});
+    """#
+
+    // Pure helpers are shared with regression fixtures. Parsing all fences,
+    // including ordinary code, prevents an example containing an ANSI fence
+    // from being mistaken for another rendered report.
+    static let terminalMarkdownHelpers = #"""
+    const terminalMarkdownText = markdown => {
+        if (typeof markdown !== 'string' || markdown.length > 512 * 1024) return null;
+        const reports = [];
+        let fence = null, body = [];
+        for (const line of markdown.replace(/\r\n?/g, '\n').split('\n')) {
+            if (fence) {
+                const closing = /^ {0,3}(`{3,}|~{3,})[\t ]*$/.exec(line);
+                if (closing && closing[1][0] === fence.mark && closing[1].length >= fence.length) {
+                    if (fence.ansi) {
+                        const text = body.join('\n');
+                        if (!text.trim() || reports.length >= 64) return null;
+                        reports.push(text);
+                    }
+                    fence = null;
+                    body = [];
+                } else if (fence.ansi) body.push(line);
+                continue;
+            }
+            const opening = /^ {0,3}(`{3,}|~{3,})([^\n]*)$/.exec(line);
+            if (!opening || (opening[1][0] === '`' && opening[2].includes('`'))) continue;
+            fence = {mark:opening[1][0], length:opening[1].length, ansi:/^ansi[\t ]*$/i.test(opening[2].trim())};
+        }
+        return fence?.ansi ? null : reports;
+    };
+    const terminalMarkdownSources = (value, postID, page) => {
+        const sources = new Map();
+        if (typeof value !== 'string' || value.length > 4 * 1024 * 1024) return sources;
+        let payload;
+        try { payload = JSON.parse(value); } catch { return sources; }
+        if (!Number.isSafeInteger(postID) || postID <= 0 || !Number.isSafeInteger(page) || page <= 0 ||
+            payload?.postID !== postID || payload?.page !== page || !Array.isArray(payload.comments) ||
+            payload.comments.length > 100) return sources;
+        const seen = new Set(), duplicates = new Set();
+        let length = 0;
+        for (const item of payload.comments) {
+            const floor = item?.floorIndex;
+            if (!Number.isSafeInteger(floor) || floor < 0) continue;
+            if (seen.has(floor)) duplicates.add(floor);
+            seen.add(floor);
+            if (typeof item.markdown !== 'string') continue;
+            length += item.markdown.length;
+            if (length > 2 * 1024 * 1024) return new Map();
+            const reports = terminalMarkdownText(item.markdown);
+            if (reports?.length) sources.set(String(floor), reports);
+        }
+        for (const floor of duplicates) sources.delete(String(floor));
+        return sources;
+    };
     """#
 
     static let captureTerminals = terminalSource + #"""
     ;(() => {
         if (!/^\/post-\d+-\d+\/?$/.test(location.pathname)) return;
         const panes = new WeakMap();
-        const captured = new WeakSet();
+        const captured = new WeakMap();
         const collect = (pre, parent) => {
-            if (!parent || captured.has(pre)) return;
+            if (!parent) return;
             const pane = parent.closest('.nsk-magic-tab-body, .post-content');
             if (!pane) return;
             const code = pre.querySelector('code') || pre;
-            const text = code.textContent;
+            const text = terminalCodeText(code);
             const hint = /ansi|terminal|xterm/i.test(pre.className + ' ' + code.className) ||
                 Boolean(pane.matches('.nsk-magic-tab-body') && /基本信息|IP质量/i.test(pane.previousElementSibling?.textContent ?? ''));
-            if (!ansiReport(text, hint)) return;
-            captured.add(pre);
+            if (!text.trim() || (!explicitANSI(code) && !ansiReport(text, hint))) return;
+            const existing = captured.get(pre);
+            if (existing) { existing.text = text; return; }
+            const record = {pre, parent, text};
+            captured.set(pre, record);
             const source = panes.get(pane) ?? [];
-            source.push({ pre, parent, text });
+            source.push(record);
             panes.set(pane, source);
         };
         const scan = node => {
@@ -152,6 +331,11 @@ enum ForumPageScript {
         };
         const observer = new MutationObserver(records => {
             for (const change of records) {
+                if (change.target.nodeType === Node.TEXT_NODE) {
+                    const pre = change.target.parentElement?.closest('pre');
+                    if (pre) collect(pre, pre.parentElement);
+                    continue;
+                }
                 if (change.target.nodeType !== Node.ELEMENT_NODE) continue;
                 if (change.target.matches('pre')) collect(change.target, change.target.parentElement);
                 else if (change.target.matches('pre code')) collect(change.target.closest('pre'), change.target.closest('pre').parentElement);
@@ -161,7 +345,7 @@ enum ForumPageScript {
                 for (const added of change.addedNodes) scan(added);
             }
         });
-        observer.observe(document, {childList:true, subtree:true});
+        observer.observe(document, {childList:true, characterData:true, subtree:true});
         document.addEventListener('DOMContentLoaded', () => scan(document.documentElement), {once:true, capture:true});
         globalThis.__seekDeskTerminalSources = panes;
         setTimeout(() => observer.disconnect(), 12000);
@@ -183,24 +367,77 @@ enum ForumPageScript {
     const excluded = node => node.matches('script,style,noscript,template,[hidden],[aria-hidden="true"]') ||
         getComputedStyle(node).display === 'none' || getComputedStyle(node).visibility === 'hidden';
     const main = document.querySelector('#nsk-body-left');
-    const root = main?.querySelector('.nsk-post-wrapper .content-item[id="0"]');
+    const visibleFloor = item => {
+        for (let node = item; node; node = node.parentElement) {
+            if (excluded(node)) return false;
+            if (node === main) return true;
+        }
+        return false;
+    };
+    const rootCandidate = main?.querySelector('.nsk-post-wrapper .content-item[id="0"]');
+    const root = rootCandidate && visibleFloor(rootCandidate) ? rootCandidate : null;
     const title = main?.querySelector('h1 .post-title-link');
     const current = /^\/post-(\d+)-(\d+)\/?$/.exec(location.pathname);
     const page = Number(current?.[2]) || 1;
     if (!title || (!root && (page === 1 || !main.querySelector('.comment-container')))) {
         return JSON.stringify({ error: 'missing' });
     }
-    const requested = typeof onlyFloor === 'string' && /^\d+$/.test(onlyFloor) ? onlyFloor : '';
+    const requested = typeof onlyFloor === 'string' ? onlyFloor : null;
+    if (requested === null || (requested !== '' && (!/^(0|[1-9]\d*)$/.test(requested) ||
+        !Number.isSafeInteger(Number(requested))))) return JSON.stringify({error:'missing'});
     const commentItems = [...main.querySelectorAll('.comments > .content-item[id]')]
-        .filter(item => /^\d+$/.test(item.id) && !excluded(item));
-    const firstFloor = root || commentItems[0];
+        .filter(item => /^(0|[1-9]\d*)$/.test(item.id) && Number.isSafeInteger(Number(item.id)) && visibleFloor(item));
+    const selected = requested ? [root, ...commentItems].filter(item => item?.id === requested) : [];
+    if (requested && selected.length !== 1) return JSON.stringify({error:'missing'});
+    const relevant = requested ? selected[0] : main;
+    const firstFloor = requested ? selected[0] : root || commentItems[0];
     for (let attempt = 0; firstFloor && !firstFloor.querySelector(':scope > .comment-menu [title="点赞"]') && attempt < 8; attempt++) {
         await new Promise(resolve => setTimeout(resolve, 80));
     }
-    const relevant = requested ? (requested === '0' ? root : commentItems.find(item => item.id === requested)) : main;
     \#(terminalSource)
+    \#(terminalMarkdownHelpers)
     const renderedSelector = '.terminal-container, .xterm';
     const terminalRoot = node => node.matches(renderedSelector) && !node.parentElement?.closest(renderedSelector);
+    const inactiveTerminalPane = node => node.matches('.nsk-magic-tab-body:not(.is-active)') &&
+        !node.matches('[hidden], [aria-hidden="true"]') && getComputedStyle(node).visibility !== 'hidden';
+    const terminalVisible = node => {
+        for (let ancestor = node; ancestor; ancestor = ancestor.parentElement) {
+            if (excluded(ancestor) && !inactiveTerminalPane(ancestor)) return false;
+            if (ancestor === main) return true;
+        }
+        return false;
+    };
+    const sourceReports = terminalMarkdownSources(typeof terminalSources === 'string' ? terminalSources : '', Number(current?.[1]), page);
+    const visibleFloors = [root, ...commentItems].filter(Boolean);
+    let terminalSlots = new WeakMap();
+    const markdownText = node => {
+        if (!terminalRoot(node) || !terminalVisible(node)) return null;
+        const content = node.closest('.post-content');
+        const item = content?.parentElement;
+        if (!item || !visibleFloors.includes(item) || (requested && item.id !== requested) ||
+            visibleFloors.filter(floor => floor.id === item.id).length !== 1) return null;
+        let visible = false;
+        for (let ancestor = content; ancestor; ancestor = ancestor.parentElement) {
+            if (excluded(ancestor)) return null;
+            if (ancestor === main) { visible = true; break; }
+        }
+        if (!visible) return null;
+        const reports = sourceReports.get(item.id);
+        if (!reports) return null;
+        // The site converts only its first ANSI blocks. Count remaining PREs
+        // alongside converted roots so a mixed page cannot shift the pairing.
+        let slots = terminalSlots.get(content);
+        if (!slots) {
+            slots = [...content.querySelectorAll('.terminal-container, .xterm, pre')].filter(candidate =>
+                candidate.closest('.post-content') === content &&
+                (terminalRoot(candidate) || (candidate.tagName === 'PRE' && !candidate.closest(renderedSelector) &&
+                    explicitANSI(candidate.querySelector('code') || candidate))));
+            terminalSlots.set(content, slots);
+        }
+        if (slots.length !== reports.length) return null;
+        const index = slots.indexOf(node);
+        return index < 0 ? null : reports[index];
+    };
     const rootsIn = scope => [...scope.querySelectorAll(renderedSelector)]
         .filter(node => terminalRoot(node) && node.closest('.nsk-magic-tab-body, .post-content') === scope);
     const capturedText = node => {
@@ -219,12 +456,45 @@ enum ForumPageScript {
         return rows?.textContent.trim() ? rows : null;
     };
     const incomplete = () => [...(relevant?.querySelectorAll('.post-content :is(.terminal-container, .xterm)') || [])]
-        .some(node => terminalRoot(node) && !capturedText(node) && !drawnRows(node));
+        .some(node => terminalRoot(node) && terminalVisible(node) && !markdownText(node) && !capturedText(node) && !drawnRows(node));
     // Only wait for a report that is actually present but not painted yet.
     for (let attempt = 0; attempt < 25 && incomplete(); attempt++) {
         await new Promise(resolve => setTimeout(resolve, 80));
+        // The site may replace another PRE while drawing. Reuse only within
+        // one synchronous pass; never retain a slot order across a DOM wait.
+        terminalSlots = new WeakMap();
     }
-    const escape = text => text.replace(/[\\`*_~\[\]<>]/g, '\\$&');
+    const escape = text => text.replace(/[\\`*_~\[\]<>&.:]/g, '\\$&');
+    const imageSize = (node, url) => {
+        // data-src can still point at a different resource than the loaded
+        // placeholder. Never attach that placeholder's dimensions to it.
+        const loadedURL = safeURL(node.currentSrc || node.src, true);
+        const width = node.naturalWidth, height = node.naturalHeight;
+        const valid = (width, height) => Number.isFinite(width) && Number.isFinite(height) &&
+            width > 0 && height > 0 && width <= 100000 && height <= 100000 && width * height <= 1000000000;
+        if (node.complete && loadedURL === url && valid(width, height)) return {width, height};
+        // A lazy image may not be downloaded yet, but explicit HTML dimensions
+        // already describe its aspect ratio. Ignore CSS/layout sizes, percentages
+        // and data-src placeholders, which may describe a different resource.
+        if (loadedURL !== url || safeURL(node.getAttribute?.('src'), true) !== url) return null;
+        const declared = name => {
+            const value = node.getAttribute?.(name)?.trim() || '';
+            return /^\d+(?:\.\d+)?$/.test(value) ? Number(value) : NaN;
+        };
+        const declaredWidth = declared('width'), declaredHeight = declared('height');
+        return valid(declaredWidth, declaredHeight) ? {width:declaredWidth, height:declaredHeight} : null;
+    };
+    const codeLanguage = (code, pre) => {
+        for (const element of code === pre ? [code] : [code, pre]) {
+            for (const name of element.classList ?? []) {
+                const match = /^(?:language-|lang-)([a-z0-9][a-z0-9_+#.-]{0,31})$/i.exec(name);
+                if (match) return match[1].toLowerCase();
+            }
+            const hint = element.getAttribute('data-language') || element.getAttribute('data-lang') || '';
+            if (/^[a-z0-9][a-z0-9_+#.-]{0,31}$/i.test(hint)) return hint.toLowerCase();
+        }
+        return null;
+    };
     const collect = (article, output, quote = false, skip = null) => {
         let buffer = '';
         const append = (kind, text, url = null) => output.push({ kind, text, url });
@@ -240,7 +510,8 @@ enum ForumPageScript {
             if (tag === 'IMG') {
                 flush();
                 const url = safeURL(node.getAttribute('data-src') || node.getAttribute('src'), true);
-                if (url) append(node.classList.contains('sticker') ? 'sticker' : 'image', node.alt || '帖子图片', url);
+                if (url) output.push({kind:node.classList.contains('sticker') ? 'sticker' : 'image',
+                    text:node.alt || '帖子图片', url, imageSize:imageSize(node, url)});
                 else if (node.alt) append('text', escape(node.alt));
                 return '';
             }
@@ -257,7 +528,7 @@ enum ForumPageScript {
             let decorated = trimmed;
             if (tag === 'A') {
                 const url = safeURL(node.getAttribute('href'));
-                if (url) decorated = `[${trimmed}](<${url.replace(/[<>]/g, v => encodeURIComponent(v))}>)`;
+                if (url) decorated = `[${trimmed}](<${url.replace(/&/g, '&amp;').replace(/[<>]/g, v => encodeURIComponent(v))}>)`;
             } else if (tag === 'STRONG' || tag === 'B') decorated = `**${trimmed}**`;
             else if (tag === 'EM' || tag === 'I') decorated = `*${trimmed}*`;
             else if (tag === 'S' || tag === 'DEL') decorated = `~~${trimmed}~~`;
@@ -272,8 +543,9 @@ enum ForumPageScript {
             if (node.nodeType === Node.TEXT_NODE) { appendInline(node); return; }
             if (node.nodeType !== Node.ELEMENT_NODE) return;
             if (terminalRoot(node)) {
+                if (!terminalVisible(node)) return;
                 flush();
-                const raw = capturedText(node);
+                const raw = markdownText(node) || capturedText(node);
                 if (raw) { append('terminal', raw); return; }
                 const terminal = drawnRows(node);
                 if (!terminal) { append('terminalUnavailable', ''); return; }
@@ -292,8 +564,7 @@ enum ForumPageScript {
                 if (lines.length) output.push({kind:'terminal', text:'', terminal:lines});
                 return;
             }
-            if (excluded(node) && !(node.matches('div') && !node.matches('[hidden], [aria-hidden="true"]') &&
-                node.querySelector(renderedSelector))) return;
+            if (excluded(node) && !inactiveTerminalPane(node)) return;
             if (node.matches('.nsk-magic-tabs')) {
                 flush();
                 const tabs = [];
@@ -301,6 +572,7 @@ enum ForumPageScript {
                     if (!label.matches('.nsk-magic-tab-title')) continue;
                     const pane = label.nextElementSibling;
                     if (!pane?.matches('.nsk-magic-tab-body')) continue;
+                    if (excluded(pane) && !inactiveTerminalPane(pane)) continue;
                     const blocks = [];
                     collect(pane, blocks);
                     tabs.push({label:plain(label), blocks});
@@ -312,11 +584,16 @@ enum ForumPageScript {
                 case 'PRE': {
                     flush();
                     const code = node.querySelector('code') || node;
-                    const text = code.textContent.replace(/\n$/, '');
+                    const text = terminalCodeText(code).replace(/\n$/, '');
                     const pane = node.closest('.nsk-magic-tab-body');
                     const hint = /ansi|terminal|xterm/i.test(node.className + ' ' + code.className) ||
                         /基本信息|IP质量/i.test(pane?.previousElementSibling?.textContent ?? '');
-                    append(ansiReport(text, hint) ? 'terminal' : 'code', text);
+                    const isTerminal = explicitANSI(code) || ansiReport(text, hint);
+                    if (isTerminal) {
+                        if (terminalVisible(node)) append('terminal', text);
+                    } else {
+                        output.push({kind:'code', text, language:codeLanguage(code, node)});
+                    }
                     break;
                 }
                 case 'BLOCKQUOTE': flush(); collect(node, output, true); break;
@@ -331,13 +608,27 @@ enum ForumPageScript {
                 case 'HR': flush(); append('rule', ''); break;
                 case 'UL': case 'OL': {
                     flush();
-                    let counter = Number(node.getAttribute('start')) || 1;
-                    for (const item of node.children) {
-                        if (item.tagName !== 'LI' || excluded(item)) continue;
-                        buffer = node.tagName === 'OL' ? `${counter++}. ` : '• ';
-                        for (const child of item.childNodes) walk(child);
-                        flush();
+                    const children = [...node.children].filter(item =>
+                        item.tagName === 'LI' && getComputedStyle(item).display !== 'none');
+                    const integer = value => {
+                        const raw = value?.trim() ?? '';
+                        const number = /^[+-]?\d+$/.test(raw) ? Number(raw) : NaN;
+                        return Number.isSafeInteger(number) ? number : null;
+                    };
+                    const ordered = node.tagName === 'OL';
+                    const step = ordered && node.hasAttribute('reversed') ? -1 : 1;
+                    let counter = integer(node.getAttribute('start')) ?? (step < 0 ? children.length : 1);
+                    const items = [];
+                    for (const item of children) {
+                        if (ordered) counter = integer(item.getAttribute('value')) ?? counter;
+                        if (!excluded(item)) {
+                            const blocks = [];
+                            collect(item, blocks, quote);
+                            items.push({marker:ordered ? `${counter}.` : '•', blocks});
+                        }
+                        counter += step;
                     }
+                    if (items.length) output.push({kind:'list', text:'', items});
                     break;
                 }
                 case 'H1': case 'H2': case 'H3': case 'H4': case 'H5': case 'H6':
@@ -358,6 +649,15 @@ enum ForumPageScript {
         if (article) for (const child of article.childNodes) if (child !== skip) walk(child);
         flush();
     };
+    const signatureText = blocks => blocks.map(block => {
+        if (block.kind === 'text') return block.text;
+        if (block.kind !== 'list') return '';
+        return block.items.map(item => {
+            const text = signatureText(item.blocks);
+            const indent = ' '.repeat(item.marker.length + 1);
+            return item.marker + (text ? ' ' + text.replace(/\n/g, '\n' + indent) : '');
+        }).join('\n');
+    }).filter(Boolean).join('\n');
     const floor = item => {
         const meta = item.querySelector(':scope > .nsk-content-meta-info');
         const avatar = meta?.querySelector('.avatar-wrapper img');
@@ -381,7 +681,7 @@ enum ForumPageScript {
         collect(item.querySelector(':scope > .signature, :scope > .user-signature'), signature);
         return { id:item.id, author:plain(author), authorID, tags, isAuthor:item.id === '0' || Boolean(meta?.querySelector('.is-poster')), avatar:avatarURL,
                  date:time?.getAttribute('title') || '', dateLabel:plain(time), blocks,
-                 signature:signature.filter(block => block.kind === 'text').map(block => block.text).join('\n') || null,
+                 signature:signatureText(signature) || null,
                  likes:count('点赞'), chicken:count('加鸡腿'), dislikes:count('反对'),
                  upvoted:reaction('点赞')?.classList.contains('clicked') ?? null,
                  gaveChicken:reaction('加鸡腿')?.classList.contains('clicked') ?? null,
@@ -446,8 +746,11 @@ enum ForumTerminalANSI {
     ]
 
     static func lines(_ input: String) -> [[ForumTerminalSpan]] {
+        // Swift treats CRLF as one Character. Normalize it before splitting so
+        // a Windows line ending cannot become a printable control or overwrite.
+        let normalized = input.utf8.contains(13) ? input.replacingOccurrences(of: "\r\n", with: "\n") : input
         var style = Style()
-        return input.split(separator: "\n", omittingEmptySubsequences: false).map { raw in
+        return normalized.split(separator: "\n", omittingEmptySubsequences: false).map { raw in
             let line = String(raw)
             let source = line as NSString
             var cursor = 0
@@ -470,11 +773,118 @@ enum ForumTerminalANSI {
                 cursor = NSMaxRange(match.range)
             }
             if cursor < source.length { output.append(style.span(source.substring(from: cursor))) }
-            return output
+            // Ordinary reports retain the existing span-only path. A cell grid
+            // is needed only when the input actually changes the inline cursor.
+            return line.utf8.contains(where: { $0 == 8 || $0 == 9 || $0 == 13 }) ? composedLine(output) : output
         }
     }
 
-    private struct Style {
+    /// A bounded static-report model: BS moves one column, CR returns to column
+    /// zero, and HT advances to an eight-column stop. LF starts another line.
+    /// It intentionally does not emulate arbitrary CSI cursor motion, erase,
+    /// scrolling or terminal modes. Ambiguous-width characters use one column;
+    /// CJK/fullwidth and emoji presentation use two. A partial overwrite clears
+    /// the whole old wide glyph, filling the untouched half with the new style.
+    private static func composedLine(_ spans: [ForumTerminalSpan]) -> [ForumTerminalSpan] {
+        struct Cell {
+            var text: String
+            let style: Style
+            let width: Int // zero is the continuation of a two-column glyph
+        }
+        let text = spans.map(\.text).joined()
+        guard !text.isEmpty else { return [] }
+        var cells: [Cell] = []
+        var column = 0
+        var spanIndex = 0
+        var spanEnd = spans[0].text.utf8.count
+        var offset = 0
+
+        func glyphStart(at index: Int) -> Int {
+            cells[index].width == 0 && index > 0 ? index - 1 : index
+        }
+
+        for character in text {
+            while offset >= spanEnd && spanIndex + 1 < spans.count {
+                spanIndex += 1
+                spanEnd += spans[spanIndex].text.utf8.count
+            }
+            let source = spans[spanIndex]
+            let style = Style(foreground: source.foreground, background: source.background, bold: source.bold)
+            let glyph = String(character)
+            offset += glyph.utf8.count
+            switch character {
+            case "\u{0008}": column = max(0, column - 1); continue
+            case "\r": column = 0; continue
+            case "\t": column += 8 - column % 8; continue
+            default: break
+            }
+
+            let width = columnWidth(character)
+            if width == 0 {
+                // A mark separated from its base by a cursor control may only
+                // attach to an existing preceding cell, never form a new column.
+                if column > 0 && column <= cells.count {
+                    let start = glyphStart(at: column - 1)
+                    cells[start].text.append(character)
+                }
+                continue
+            }
+            let blank = Cell(text: " ", style: style, width: 1)
+            while cells.count < column + width { cells.append(blank) }
+            for target in column..<(column + width) {
+                let start = glyphStart(at: target)
+                if cells[start].width == 2 {
+                    cells[start] = blank
+                    cells[start + 1] = blank
+                }
+            }
+            cells[column] = Cell(text: glyph, style: style, width: width)
+            if width == 2 { cells[column + 1] = Cell(text: "", style: style, width: 0) }
+            column += width
+        }
+
+        var result: [ForumTerminalSpan] = []
+        var activeStyle: Style?
+        var buffer = ""
+        for cell in cells where cell.width > 0 {
+            if activeStyle != cell.style {
+                if let activeStyle, !buffer.isEmpty { result.append(activeStyle.span(buffer)) }
+                activeStyle = cell.style
+                buffer = ""
+            }
+            buffer += cell.text
+        }
+        if let activeStyle, !buffer.isEmpty { result.append(activeStyle.span(buffer)) }
+        return result
+    }
+
+    private static func columnWidth(_ character: Character) -> Int {
+        let scalars = Array(character.unicodeScalars)
+        let visible = scalars.filter {
+            switch $0.properties.generalCategory {
+            case .nonspacingMark, .spacingMark, .enclosingMark, .format: false
+            default: true
+            }
+        }
+        if visible.isEmpty { return 0 }
+        // Whole-string graphemes are used after SGR removal, so combining text
+        // and emoji ZWJ sequences remain intact even across style boundaries.
+        let textPresentation = scalars.contains { $0.value == 0xFE0E }
+        if !textPresentation && (scalars.contains { $0.properties.isEmojiPresentation } ||
+            (scalars.contains { $0.value == 0xFE0F || $0.value == 0x20E3 } &&
+                scalars.contains { $0.properties.isEmoji })) { return 2 }
+        if visible.contains(where: { scalar in
+            switch scalar.value {
+            case 0x1100...0x115F, 0x2329...0x232A, 0x2E80...0x303E, 0x3040...0xA4CF,
+                 0xAC00...0xD7A3, 0xF900...0xFAFF, 0xFE10...0xFE19, 0xFE30...0xFE6F,
+                 0xFF00...0xFF60, 0xFFE0...0xFFE6, 0x20000...0x3FFFD: true
+            default: false
+            }
+        }) { return 2 }
+        return 1
+    }
+
+    private struct Style: Equatable {
         var foreground: String?
         var background: String?
         var bold = false

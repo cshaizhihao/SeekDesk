@@ -22,9 +22,9 @@ struct ForumShortcutPane: View {
                 .accessibilityLabel("在浏览器打开\(shortcut.title)")
                 .help("在浏览器打开")
             }
-            .padding(.horizontal, 18).frame(height: 53)
-            .background(palette.chrome)
-            Rectangle().fill(palette.line).frame(height: 1)
+            .padding(.horizontal, 16).frame(height: 53)
+            .deskGlass(in: RoundedRectangle(cornerRadius: 16), solid: palette.chrome)
+            .padding(10)
             ZStack {
                 ShortcutWebView(shortcut: shortcut, session: session, state: state, openTopic: openTopic)
                     .opacity(state.phase == .ready ? 1 : 0)
@@ -36,7 +36,7 @@ struct ForumShortcutPane: View {
                     ContentUnavailableView {
                         DeskLabel("暂时无法打开\(shortcut.title)", systemImage: "wifi.exclamationmark", size: 32)
                     } actions: {
-                        Button("重试") { state.revision += 1 }
+                        Button("重试") { state.revision += 1 }.deskGlassButtonStyle()
                     }
                 case .ready: EmptyView()
                 }

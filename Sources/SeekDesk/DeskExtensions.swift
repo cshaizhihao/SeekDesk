@@ -2,11 +2,12 @@ import SwiftUI
 import UserNotifications
 
 enum DeskExtension: String, CaseIterable, Identifiable {
-    case hot, attendance, office, value, block, authorOnly, keywords, rulings
+    case hot, attendance, office, value, block, authorOnly, keywords, rulings, proxy
     var id: String { rawValue }
 
     var title: String {
         switch self {
+        case .proxy: "SeekDesk 专用代理"
         case .hot: "NodeSeek 热榜"
         case .attendance: "每日签到"
         case .office: "摸鱼老板键"
@@ -20,6 +21,7 @@ enum DeskExtension: String, CaseIterable, Identifiable {
 
     var icon: String {
         switch self {
+        case .proxy: "network"
         case .hot: "flame"
         case .attendance: "calendar.badge.checkmark"
         case .office: "tablecells.fill"
@@ -33,6 +35,7 @@ enum DeskExtension: String, CaseIterable, Identifiable {
 
     var description: String {
         switch self {
+        case .proxy: "导入自己的节点，仅代理 SeekDesk 的流量。"
         case .hot: "查看实时、日榜和周榜。"
         case .attendance: "每天零点签到领鸡腿，可选固定或运气签到。"
         case .office: "把论坛窗口切换为工作表，支持自定义快捷键。"
@@ -148,6 +151,7 @@ final class DeskExtensions: ObservableObject {
             if !isEnabled { dismissWatchPopup() }
             updateKeywordMonitoring()
         }
+        if item == .proxy { DeskProxyController.shared.setAvailable(isEnabled) }
         persistExtensions()
     }
 

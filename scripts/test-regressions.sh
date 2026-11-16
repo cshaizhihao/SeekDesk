@@ -5,6 +5,7 @@ cd "$(dirname "$0")/.."
 output="$(mktemp -d "${TMPDIR:-/tmp}/seekdesk-regressions.XXXXXX")"
 trap 'rm -rf "$output"' EXIT
 mkdir -p .build/module-cache
+source scripts/test-yaml.sh
 sources=()
 for source in Sources/SeekDesk/*.swift; do
     case "${source##*/}" in
@@ -13,5 +14,6 @@ for source in Sources/SeekDesk/*.swift; do
     esac
 done
 swiftc -parse-as-library -module-cache-path "$PWD/.build/module-cache" \
+    "${yaml_args[@]}" \
     "${sources[@]}" Tests/Regression/FixesChecks.swift -o "$output/SeekDeskRegressions"
 "$output/SeekDeskRegressions"

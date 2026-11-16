@@ -1,0 +1,149 @@
+SeekDesk local compatibility changes
+===================================
+
+Base: liquid_glass_widgets 1.17.3, as distributed by pub.dev.
+Source: https://pub.dev/packages/liquid_glass_widgets/versions/1.17.3
+Repository: https://github.com/sdegenaar/liquid_glass_widgets
+License: MIT; see LICENSE and THIRD_PARTY_NOTICES in this directory.
+
+This directory contains the original runtime library, shaders, iOS plugin,
+package metadata and license documents. Examples and upstream test fixtures are
+not required to build SeekDesk and are omitted. upstream-manifest.json records
+the SHA-256 of each original file before any local modification.
+
+SeekDesk keeps the upstream version number to identify the base release. The
+app's pubspec uses this source directory explicitly; pub-cache is not modified.
+
+Local patch scope
+-----------------
+
+Round 27: scrollable segment geometry and interaction compatibility
+  lib/src/widgets/interactive/scrollable_segment_content.dart
+
+The scrollable segment control must track actual label geometry when titles,
+text scales, font weights or the order of the same number of segments change.
+The patch preserves the control instance, surviving segment identities and
+official glass renderer, shaders and springs. It does not replace natural-width
+tabs with fixed-width cells or rebuild the entire control on a title update.
+
+Regression coverage lives in Flutter/test/workspace_tabs_geometry_test.dart.
+It measures the public indicator against rendered cells after title/font/order
+changes, viewport clamping and interrupted regrids; it also checks element and
+focus identity, pointer cancellation, accessibility activation, first subsequent
+lens drag, manual scroll ownership and the absence of perpetual scheduled frames.
+
+Actual layout notifications are coalesced after layout. Viewport metrics refresh
+screen-relative geometry even when ScrollPosition clamps without a listener
+callback. A press whose geometry changes is invalidated for that gesture only;
+stable ID lookup prevents an old cell from activating a new numeric slot.
+
+Round 30: optional synchronous renderer work diagnostics
+  lib/glass_work_diagnostics.dart (new)
+  lib/src/engine/liquid_glass_layer.dart
+  lib/src/engine/multi_shader_builder.dart
+  lib/src/engine/render_liquid_glass_geometry.dart
+  lib/src/engine/rendering/liquid_glass_render_object.dart
+
+The new diagnostic API is imported explicitly by SeekDesk; the package's public
+barrel exports are unchanged. Both SEEKDESK_PROFILE_FRAMES and
+SEEKDESK_PROFILE_RAW_FRAMES must be enabled at compile time, and an observer must
+be installed before measurements are created. The normal application leaves
+these flags disabled.
+
+Instrumented operations are shape-geometry checks, geometry-picture recording,
+synchronous geometry-image handle creation, shadow baking and FragmentShader
+instance creation. Observations contain fixed kinds, timestamps, frame numbers,
+durations, sizes and counts; no application text or file/network I/O is added.
+Observer errors are contained and must not replace a renderer exception.
+
+These are timing hooks, not rendering-algorithm changes: cache conditions,
+geometry invalidation, shader code, rendering order and quality selection are
+preserved. Shape-geometry observations include cache checks; they are not a
+count of actual rebuilds. Synchronous image-handle creation does not measure GPU
+completion, and these scopes do not measure every rendering operation.
+Regression coverage lives in Flutter/test/glass_work_diagnostics_test.dart.
+
+Round 31: retain fixed segmented-control labels during spring ticks
+  lib/src/widgets/interactive/segmented_control_internal.dart
+
+The ordinary label subtree is passed through VelocitySpringBuilder.child and
+then SpringBuilder.child. Alignment-spring ticks no longer reconstruct that
+subtree. Parent/configuration updates still create current labels, and the
+active-lens foreground-color branch continues to update when required. Indicator
+alignment, velocity, thickness, paint-pass order, semantics and interaction
+callbacks retain their existing implementation. No cross-configuration label
+cache or notifier-lifecycle change is introduced.
+
+Regression coverage lives in Flutter/test/glass_segmented_animation_test.dart:
+retained labels while the indicator moves, implicit/explicit lens contrast,
+changed labels and callbacks, disabled and semantic activation, theme/text scale,
+RTL/direction/size changes, and item-count changes with hover/focus interaction.
+
+Round 32: retain button animation and focus-region lifecycle state
+  lib/widgets/interactive/glass_button.dart
+  lib/widgets/shared/glass_focus_region.dart
+
+Transparent buttons retain a stable opacity wrapper when enabled changes, so
+their stretch/glow elements and spring state survive edit/preview transitions.
+Filled and prominent buttons retain their original wrapper structure: even an
+opacity of one is a shared-backdrop boundary. Disabling a button clears any
+unfinished ambient press highlight without changing animation or spring tuning.
+
+Focus regions explicitly own or borrow their focus nodes and notifiers, rebind
+replacements, and retire old callbacks across node and mode changes. Interactive
+focus highlights follow the current node and global highlight mode rather than
+a retained detector's stale focus cache. Highlight publication during build is
+coalesced after the frame and targets only the current live notifiers. Regions
+with a shape retain their child in a stable Stack with passthrough constraints,
+preserving child state and layout while the focus ring appears or disappears.
+
+Regression coverage lives in Flutter/test/glass_button_lifecycle_test.dart and
+Flutter/test/glass_focus_region_lifecycle_test.dart: animation identity across
+enabled changes, disabled pointer/keyboard/semantic activation, press/drag
+release and cancellation, focus-node/notifier ownership and replacement, stale
+callbacks, observed/interactive mode changes, editable selection retention and
+tight-constraint child geometry when the focus ring toggles.
+
+Round 33: retain the focus action wrapper across enabled changes
+  lib/widgets/shared/glass_focus_region.dart
+
+A stable Actions widget now wraps FocusableActionDetector. Its local action map
+is supplied only when the region is enabled and can request focus; otherwise an
+empty map preserves lookup of ancestor actions. The detector no longer inserts
+and removes an Actions wrapper internally, avoiding GlobalKey reparenting of
+its descendants when enabled changes. This preserves element state without the
+previous recursive deactivate/activate and unrelated inherited-dependency work.
+The detector still owns the original keyboard focus, hover and cursor behavior;
+semantics, material parameters and animation controllers are unchanged.
+
+Regression coverage lives in Flutter/test/glass_button_reparent_test.dart:
+unchanged descendant lifecycle counts through enabled round trips, real theme
+updates, disabled keyboard/pointer/semantic activation, and ancestor-action
+fallback. Existing focus lifecycle tests invoke Actions through an attached
+descendant context instead of depending on the detector's internal action map.
+
+Across these patches, material parameters, shader assets, quality levels and
+spring-physics definitions are unchanged. Round 30 modifies renderer source only
+to add opt-in diagnostics; Rounds 31 through 33 change widget reuse and lifecycle
+handling, not visual physics.
+
+When updating the upstream dependency, first check whether these defects are fixed
+upstream and run the geometry, lifecycle, reorder, glass interaction and optional
+diagnostic tests.
+Do not copy a new release over the patch without reconciling those checks.
+
+The exact local source diff is recorded in seekdesk.patch, relative to this
+directory. It contains all eight modified original runtime files and the added
+glass_work_diagnostics.dart, including any formatting differences in those files.
+Apply it from the package root using a patch tool with one path component removed
+(-p1); additions use /dev/null as their source.
+
+Before generating this diff, every one of the 176 original files in the local
+pub-cache copy of liquid_glass_widgets 1.17.3 was checked against its SHA-256 in
+upstream-manifest.json. All 176 matched. The current vendor copy retains 168 of
+those files byte-for-byte, modifies eight, adds one runtime file and removes none.
+An exact application of seekdesk.patch to a temporary copy of verified originals
+was checked against all 177 current vendored files. The three local provenance files
+(this note, seekdesk.patch and upstream-manifest.json) are excluded from the patch
+itself. The original manifest is preserved unchanged. Reverify its hashes and
+regenerate/replay the complete diff whenever the local patch changes.

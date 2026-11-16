@@ -16,11 +16,12 @@ if let local = ProcessInfo.processInfo.environment["SEEKDESK_SPARKLE_XCFRAMEWORK
 let package = Package(
     name: "SeekDesk",
     platforms: [.macOS(.v14)],
+    dependencies: [.package(path: "Vendor/Yams")],
     targets: [
         sparkle,
         .executableTarget(
             name: "SeekDesk",
-            dependencies: ["Sparkle"],
+            dependencies: ["Sparkle", .product(name: "Yams", package: "Yams"), .product(name: "CYaml", package: "Yams")],
             linkerSettings: [.unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "@executable_path/../Frameworks"])]
         )
     ]
