@@ -71,7 +71,14 @@ enum DeskClashNode {
             if values["username"] != nil || values["password"] != nil { c.user = string("username"); c.password = string("password") }
         default:
             c.scheme = type
-            c.user = type == "trojan" ? string("password") : string("uuid")
+            if type == "trojan" {
+                // The whole Trojan password goes in the URL username. Escape
+                // the separator explicitly across Foundation versions.
+                let userCharacters = CharacterSet.urlUserAllowed.subtracting(CharacterSet(charactersIn: ":@%"))
+                c.percentEncodedUser = string("password").addingPercentEncoding(withAllowedCharacters: userCharacters)
+            } else {
+                c.user = string("uuid")
+            }
             let network = string("network", "tcp")
             q["type"] = network
             q["security"] = tls || type == "trojan" ? "tls" : "none"

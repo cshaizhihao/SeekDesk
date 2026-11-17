@@ -132,6 +132,9 @@ private func checkProxySubscriptions(fixtures: [String]) throws {
     precondition(clash.nodes.map(\.name) == ["香港 #1", "HY2", "HTTPS", "VMess", "SS", "SOCKS", "Trojan"] &&
                  clash.skipped.count == 2,
                  "Unexpected Clash fixtures: accepted \(clash.nodes.map(\.name)), skipped \(clash.skipped)")
+    let trojan = clash.nodes[6]
+    let userInfo = URLComponents(string: trojan.link)
+    precondition(userInfo?.percentEncodedUser == "a%40b%3Ac" && userInfo?.password == nil)
     let core = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Distribution/ProxyCore/xray")
     for node in clash.nodes {
         let process = Process(), pipe = Pipe()
