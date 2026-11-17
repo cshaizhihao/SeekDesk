@@ -15,23 +15,25 @@
   <img src="https://img.shields.io/badge/platform-macOS-161b22?logo=apple&amp;logoColor=white" alt="平台：macOS">
   <img src="https://img.shields.io/badge/architecture-Apple%20Silicon-007AFF" alt="架构：Apple Silicon">
   <img src="https://img.shields.io/badge/built%20with-Flutter%20%2B%20Swift-027DFD?logo=flutter&amp;logoColor=white" alt="使用 Flutter 和 Swift 构建">
-  <img src="https://img.shields.io/badge/release-v1.5.0-2ea44f" alt="版本：V1.5.0">
+  <img src="https://img.shields.io/badge/release-v1.5.1-2ea44f" alt="版本：V1.5.1">
 </p>
 
 <p align="center">
   🌐 <a href="https://www.seekdesk.cc/">官网（建设中）</a> ·
-  📦 <a href="https://github.com/cshaizhihao/SeekDesk/releases/latest">下载 V1.5.0</a> ·
+  📦 <a href="https://github.com/cshaizhihao/SeekDesk/releases/latest">下载 V1.5.1</a> ·
   💬 <a href="https://github.com/cshaizhihao/SeekDesk/issues">反馈问题</a> ·
   🐔 <a href="https://www.nodeseek.com/">NodeSeek 社区</a>
 </p>
 
-## V1.5.0
+## V1.5.1
+
+本次更新在「友情链接」新增 VPStarter 和 deerstack。已安装 V1.5.0 的用户可在「设置 → 关于」直接更新。
 
 SeekDesk 是面向 Mac 的第三方 NodeSeek 客户端。在侧栏找版块、在列表扫帖子、在右侧阅读。把多篇测评留在标签里，切回帖子时可以从上次读到的位置继续。
 
 这一版使用 Flutter 重做桌面界面，由 Swift 负责论坛请求、登录和本机数据。Liquid Glass 贯穿搜索、阅读、编辑、设置和扩展中心。可选原色、山岚和海岸等主题，正文还有独立的阅读配色。
 
-[更新日志](CHANGELOG.md) · [V1.5.0 发行说明](docs/releases/v1.5.0.md)
+[更新日志](CHANGELOG.md) · [V1.5.1 发行说明](docs/releases/v1.5.1.md)
 
 ## 界面预览
 
@@ -55,14 +57,14 @@ SeekDesk 是面向 Mac 的第三方 NodeSeek 客户端。在侧栏找版块、�
 
 ## 安装与升级
 
-1. 在 [GitHub Releases](https://github.com/cshaizhihao/SeekDesk/releases/latest) 下载 `SeekDesk-1.5.0-macOS-arm64-unsigned.dmg`，适用于 macOS 14 或以上的 Apple Silicon Mac。
+1. 在 [GitHub Releases](https://github.com/cshaizhihao/SeekDesk/releases/latest) 下载 `SeekDesk-1.5.1-macOS-arm64-unsigned.dmg`，适用于 macOS 14 或以上的 Apple Silicon Mac。
 2. 打开 DMG，将 SeekDesk 拖入「应用程序」。如果 macOS 阻止首次启动，打开「系统设置 → 隐私与安全性」，根据系统提示操作。本发行包未进行 Apple Developer ID 签名或 Apple 公证。
 3. **从 V1.0.0 升级时手动替换一次。** 后续在「设置 → 关于」点击「检查更新」。发现新版后点「更新并重启」。升级过程会保存可恢复的本地草稿；使用专用代理时，先关闭该代理再下载更新。
 
 DMG 下载校验可在同一目录执行以下命令。
 
 ```sh
-shasum -a 256 -c SeekDesk-1.5.0-macOS-arm64-unsigned.dmg.sha256
+shasum -a 256 -c SeekDesk-1.5.1-macOS-arm64-unsigned.dmg.sha256
 ```
 
 ## 开发与构建
@@ -96,4 +98,5 @@ SeekDesk 是独立开发的第三方客户端，与 NodeSeek 官方没有隶属�
 | <img src="assets/partner-shlii.png" width="48" alt="Shlii Logo"><br>**Shlii** | 高性价比的 VPS、NAT 平台 | [官网](https://shlii.io/) · [Telegram 群组](https://t.me/IncuShliidlb) |
 | <img src="assets/partner-pickmyvps.png" width="48" alt="PickMyVPS Logo"><br>**PickMyVPS** | 自购 400+ 台热门线路 / 落地机探针站 | [官网](https://www.pickmyvps.com/) · [Telegram 群组](https://t.me/PickMyVPS_Group) |
 | <img src="assets/partner-cowcode.png" width="48" alt="CowCode Logo"><br>**CowCode** | 下一代AI全聚合中转平台 主流模型 0.1x 起 | [官网](https://cowcode.top/r/cshaizhihao) |
-
+| <img src="assets/partner-vpstarter.png" width="48" alt="VPStarter Logo"><br>**VPStarter** | VPS 详细观察与评测的工具站 | [官网](https://vpstarter.com/) |
+| <img src="assets/partner-deerstack.png" width="48" alt="deerstack Logo"><br>**deerstack** | 服务器实测、避坑教程和实用工具 | [官网](https://deerstack.com/) |

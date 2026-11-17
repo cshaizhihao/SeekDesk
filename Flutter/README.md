@@ -6,7 +6,7 @@ SeekDesk 的 Flutter 界面重构工程。界面使用官方
 依赖固定在 `../Vendor/liquid_glass_widgets`，保留官方渲染器和着色器，并对可滚动
 标签的动态几何更新做局部修正；原始文件哈希、许可证和补丁说明随源码保留。
 
-V1.5.0（构建 71）使用此 Flutter 客户端。
+V1.5.1（构建 72）使用此 Flutter 客户端。
 经明确授权的本机交付使用 `/Applications/SeekDesk.app` 和原有
 `com.seekdesk.client` 标识，连接真实 Swift 业务服务并保留账号与设置。
 普通开发构建仍使用独立的预览标识；两种构建方式见下文，不能互换安装。

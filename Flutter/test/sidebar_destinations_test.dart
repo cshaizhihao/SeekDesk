@@ -197,7 +197,7 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   testWidgets(
-    'friends restores all original partners and returns to the same topic without listing actions',
+    'friends opens partner websites and returns to the same topic without listing actions',
     (tester) async {
       final native = _NavigationNative();
       final state = await _mount(tester, native);
@@ -213,16 +213,25 @@ void main() {
         );
         expect(bytes!.lengthInBytes, greaterThan(100));
       }
-      final cow = find.byWidgetPredicate(
-        (widget) =>
-            widget is DeskButton && widget.semanticLabel == 'CowCode 官网',
-      );
-      await tester.ensureVisible(cow);
-      await tester.tap(cow);
-      await _frames(tester);
+      const websites = {
+        'CowCode': 'https://cowcode.top/r/cshaizhihao',
+        'VPStarter': 'https://vpstarter.com/',
+        'deerstack': 'https://deerstack.com/',
+      };
+      for (final name in websites.keys) {
+        final website = find.byWidgetPredicate(
+          (widget) =>
+              widget is DeskButton && widget.semanticLabel == '$name 官网',
+        );
+        await tester.ensureVisible(website);
+        await tester.tap(website);
+        await _frames(tester);
+      }
       expect(
-        native.calls.where((call) => call.$1 == 'external.open').single.$2,
-        {'url': 'https://cowcode.top/r/cshaizhihao'},
+        native.calls
+            .where((call) => call.$1 == 'external.open')
+            .map((call) => call.$2['url']),
+        websites.values,
       );
       await tester.tap(_button('返回论坛').first);
       await _frames(tester);

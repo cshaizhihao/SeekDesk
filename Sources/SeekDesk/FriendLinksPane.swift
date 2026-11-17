@@ -108,5 +108,11 @@ struct FriendLinksPane: View {
         Partner(name: "CowCode", description: "下一代AI全聚合中转平台 主流模型 0.1x 起",
                 website: URL(string: "https://cowcode.top/r/cshaizhihao")!,
                 telegram: nil),
+        Partner(name: "VPStarter", description: "VPS 详细观察与评测的工具站",
+                website: URL(string: "https://vpstarter.com/")!,
+                telegram: nil),
+        Partner(name: "deerstack", description: "服务器实测、避坑教程和实用工具",
+                website: URL(string: "https://deerstack.com/")!,
+                telegram: nil),
     ]
 }

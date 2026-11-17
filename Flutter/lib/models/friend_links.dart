@@ -26,4 +26,16 @@ const seekDeskPartners = <Map<String, String>>[
     'website': 'https://cowcode.top/r/cshaizhihao',
     'asset': 'assets/partners/CowCode.png',
   },
+  {
+    'name': 'VPStarter',
+    'description': 'VPS 详细观察与评测的工具站',
+    'website': 'https://vpstarter.com/',
+    'asset': 'assets/partners/VPStarter.png',
+  },
+  {
+    'name': 'deerstack',
+    'description': '服务器实测、避坑教程和实用工具',
+    'website': 'https://deerstack.com/',
+    'asset': 'assets/partners/deerstack.png',
+  },
 ];
