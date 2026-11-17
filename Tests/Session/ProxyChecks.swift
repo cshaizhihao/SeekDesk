@@ -129,7 +129,9 @@ private func checkProxySubscriptions(fixtures: [String]) throws {
       - {name: unsupported, type: ss, server: example.invalid, port: 8388, cipher: aes-128-gcm, password: secret, plugin: obfs}
     """
     let clash = try DeskProxySubscriptionParser.parse(Data(yaml.utf8))
-    precondition(clash.nodes.count == 7 && clash.skipped.count == 2 && clash.nodes[0].name == "香港 #1")
+    precondition(clash.nodes.map(\.name) == ["香港 #1", "HY2", "HTTPS", "VMess", "SS", "SOCKS", "Trojan"] &&
+                 clash.skipped.count == 2,
+                 "Unexpected Clash fixtures: accepted \(clash.nodes.map(\.name)), skipped \(clash.skipped)")
     let core = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Distribution/ProxyCore/xray")
     for node in clash.nodes {
         let process = Process(), pipe = Pipe()
