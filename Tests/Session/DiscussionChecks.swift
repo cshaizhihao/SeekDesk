@@ -7,13 +7,18 @@ func checkDiscussion() throws {
     let mock = JSContext()!
     let testScript = #"""
     var writes = [];
-    var answer;
+    var answer, failure;
     var location = {protocol:'https:',host:'www.nodeseek.com',pathname:'/new-discussion'};
     var window = {__config__:{user:{rank:4}}};
+    function option(value, textContent, {disabled = false, disabledGroup = false} = {}) {
+        return {value, textContent, disabled,
+            closest: selector => selector === 'optgroup:disabled' && disabledGroup ? {} : null};
+    }
     var document = {querySelector: selector => selector === '#editor' ? {} : {options:[
-        {value:'',disabled:false,textContent:'选择版块'},
-        {value:'tech',disabled:false,textContent:' 技术 '},
-        {value:'inside',disabled:true,textContent:'内版'}
+        option('', '选择版块'),
+        option('tech', ' 技术 '),
+        option('inside', '内版', {disabled:true}),
+        option('archived', '归档', {disabledGroup:true})
     ]}};
     var crypto = {getRandomValues:array=>array.fill(7)};
     var AbortSignal = {timeout: milliseconds=>milliseconds};
@@ -26,8 +31,18 @@ func checkDiscussion() throws {
     """#
     mock.evaluateScript(testScript)
     func evaluate(_ source: String, params: String = "", input: String = "") -> Data {
-        mock.evaluateScript("answer = undefined; (async function(\(params)){\n\(source)\n})(\(input)).then(value => answer = value)")
-        guard let raw = mock.objectForKeyedSubscript("answer")?.toString(), raw != "undefined" else {
+        mock.evaluateScript("""
+        answer = undefined; failure = undefined;
+        (async function(\(params)){\n\(source)\n})(\(input)).then(
+            value => { answer = value; },
+            error => { failure = String(error); }
+        );
+        """)
+        if let failure = mock.objectForKeyedSubscript("failure"), !failure.isUndefined {
+            preconditionFailure(failure.toString() ?? "Discussion JavaScript rejected")
+        }
+        guard let answer = mock.objectForKeyedSubscript("answer"), !answer.isUndefined,
+              let raw = answer.toString() else {
             preconditionFailure(mock.exception?.toString() ?? "No JS response")
         }
         return Data(raw.utf8)
@@ -47,8 +62,9 @@ func checkDiscussion() throws {
     writes[0].request.body === JSON.stringify({mode:'new-discussion',title:'标题',content:'**正文**',category:'tech',rank:4})
     """)!.toBool())
     let invalidCategory = try response("inside")
+    let disabledGroup = try response("archived")
     let invalidRank = try response("tech", 5)
-    precondition(invalidCategory.kind == "rejected" && invalidRank.kind == "rejected")
+    precondition(invalidCategory.kind == "rejected" && disabledGroup.kind == "rejected" && invalidRank.kind == "rejected")
     mock.evaluateScript("window.__config__.user = null")
     let signedOut = try response()
     precondition(signedOut.kind == "signedOut" && mock.evaluateScript("writes.length")!.toInt32() == 1)

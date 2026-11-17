@@ -7,10 +7,8 @@ with Impeller enabled and a native `FlutterHostDelegate` application entry point
 Default development builds use `com.seekdesk.flutter-preview`, with separate
 defaults, website data and `com.seekdesk.flutter-preview.*` Keychain service
 names. They do not automatically migrate the installed client's data.
-The explicitly authorized local delivery uses `com.seekdesk.client` and the
-original service names. The current `/Applications/SeekDesk.app` is this local
-Flutter delivery, at the unchanged version 1.0.0 (70); it is not a new published
-release. Select the intended build path rather than exchanging the two bundles.
+Distribution builds use `com.seekdesk.client` and retain the original service
+names so users can keep their account and settings through upgrades.
 
 ## Build locally
 

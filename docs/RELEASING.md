@@ -2,9 +2,21 @@
 
 ## 版本
 
-`VERSION` 是三段版本号，`BUILD_NUMBER` 是递增的内部构建号。当前为 1.0.0 / 70。`Distribution/Info.plist` 保持相同默认值；打包时脚本使用版本文件，亦允许通过 `SEEKDESK_VERSION`、`SEEKDESK_BUILD` 显式覆盖。
+`VERSION` 是三段版本号，`BUILD_NUMBER` 是递增的内部构建号。发行前同步更新 `Flutter/pubspec.yaml` 和 `Distribution/Info.plist`，并在 `docs/releases/` 添加对应的版本说明。
 
-## 检查与打包
+## 当前 Flutter 版本
+
+```sh
+bash Flutter/scripts/flutter.sh pub get
+bash Flutter/scripts/flutter.sh analyze
+bash Flutter/scripts/flutter.sh test
+bash Flutter/scripts/build-local-macos.sh
+bash Flutter/scripts/package-update.sh
+```
+
+使用经过签名结构校验的 `dist/SeekDesk.app` 制作 DMG，在卷内放置应用和指向 `/Applications` 的链接。校验 DMG 并生成同名的 `.sha256` 文件。同一 GitHub Release 应包含 DMG、SHA-256 文件、更新 ZIP 和 `appcast.xml`。确认四项资产完整后再公开发布。
+
+## 独立 SwiftUI 版本
 
 ```sh
 ./scripts/test.sh
@@ -29,9 +41,9 @@ export SEEKDESK_NOTARY_PROFILE='SeekDesk-notary'
 
 此模式为内嵌可执行组件逐个签名，启用 Hardened Runtime 与安全时间戳，提交 DMG 公证，附加票据并执行校验。手动更新的公证版不要求配置 Sparkle feed。发布前还应验证下载后的首次打开、应用替换、会话和本机数据恢复。
 
-## 可选的应用内自动更新
+## 应用内更新
 
-配置 `SEEKDESK_FEED_URL`（HTTPS）及 `SEEKDESK_UPDATE_PUBLIC_KEY`（32 字节 Ed25519 公钥的 Base64）后，`release` 模式启用 Sparkle。私钥保存在发行环境，使用 Sparkle 的 `generate_appcast` 为最终产物生成签名更新源，验证从旧版到新版的完整升级后再公开 feed。
+独立 SwiftUI 打包脚本的 `release` 模式可通过 `SEEKDESK_FEED_URL` 与 `SEEKDESK_UPDATE_PUBLIC_KEY` 单独配置 Sparkle。Flutter 正式构建自 V1.5.0 起使用仓库的 GitHub Release 更新源。
 
 已发布的 V1.0.0 需要手动安装一次含有更新功能的 Flutter 版本。后续更新使用 GitHub Release 内的 `appcast.xml` 和经过 Ed25519 签名的 ZIP。应用包仍可使用临时签名。
 
